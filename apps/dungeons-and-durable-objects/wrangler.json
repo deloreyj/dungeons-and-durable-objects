@@ -1,0 +1,18 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "dungeons-and-durable-objects",
+	"compatibility_date": "2024-12-30",
+	"main": "./server.ts",
+	"assets": {
+		"directory": "./build/client"
+	},
+	"observability": {
+		"enabled": true
+	},
+	"vars": {
+		"API_BASE_URL": "http://localhost:8787"
+	},
+	"ai": {
+		"binding": "AI"
+	}
+}

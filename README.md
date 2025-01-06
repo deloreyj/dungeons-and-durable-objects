@@ -10,7 +10,7 @@ The repository is set up as a `pnpm` workspace with two apps:
 
 - `apps/backend` - This app will contain all of the Durable Objects, websocket server, data storage, etc that make up the backend of the app.
   - At some point we may want to separate the durable objects from the CRUD API that we'll need in order to manage Campaigns, Sessions, and Characters. tbd
-- `apps/frontend` - This app will contain a Cloudflare Pages project using Remix, Tailwind CSS, Typescript, and Cloudflare Pages Functions to bind to the services in the backend.
+- `apps/dungeons-and-durable-objects` - This app will contain a Cloudflare Pages project using Remix, Tailwind CSS, Typescript, and Cloudflare Pages Functions to bind to the services in the backend.
 
 ## Setup
 
@@ -34,7 +34,7 @@ pnpm dev
 ```
 
 ```sh
-cd apps/frontend
+cd apps/dungeons-and-durable-objects
 pnpm dev
 ```
 

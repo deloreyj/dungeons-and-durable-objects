@@ -1,22 +1,16 @@
 import { DurableObjectState } from '@cloudflare/workers-types';
-import { Dice } from './dice';
-import { Ability, AbilityIndex, SkillIndex, SkillNameToStatNameMap, SkillProficiencySet, StatIndex, StatName } from './charactertypes';
-import { DurableObject, WorkerEntrypoint } from 'cloudflare:workers';
-import { z } from 'zod';
-
-export const characterSchema = z.object({
-	name: z.string(),
-	alignment: z.string(),
-	stats: z.any(), // TODO: Add stats schema
-	backStory: z.string(),
-	abilities: z.any(), // TODO: Add ability schema
-	hitPoints: z.number(),
-	movementSpeed: z.number(),
-	skills: z.object({}).passthrough().optional(),
-	proficiencyBonus: z.number().optional(),
-	skillProficiencies: z.any().optional(), // TODO: Add skillProficiencies schema
-	physicalDescription: z.string().optional(),
-});
+import {
+	Ability,
+	AbilityIndex,
+	CharacterJSON,
+	Race,
+	SkillIndex,
+	SkillNameToStatNameMap,
+	SkillProficiencySet,
+	StatIndex,
+	StatName,
+} from './types';
+import { DurableObject } from 'cloudflare:workers';
 
 export class Character extends DurableObject<Env> {
 	name: string;
@@ -151,36 +145,35 @@ export class Character extends DurableObject<Env> {
 		this.proficiencyBonus = proficiencyBonus;
 	}
 
-	randomizeStats(skillProficiencies?: SkillProficiencySet) {
-		const roll4d6DropWorst = () => {
-			const rolls = [Dice.rolld6(), Dice.rolld6(), Dice.rolld6(), Dice.rolld6()];
-			const minRoll = Math.min(...rolls);
-			return rolls.reduce((accumulator, currentValue) => accumulator + currentValue, 0) - minRoll;
-		};
-		const randomizedStats: StatIndex = {
-			[StatName.STR]: { raw: 10, bonus: 0 },
-			[StatName.DEX]: { raw: 10, bonus: 0 },
-			[StatName.CON]: { raw: 10, bonus: 0 },
-			[StatName.INT]: { raw: 10, bonus: 0 },
-			[StatName.WIS]: { raw: 10, bonus: 0 },
-			[StatName.CHA]: { raw: 10, bonus: 0 },
-		};
+	// randomizeStats(skillProficiencies?: SkillProficiencySet) {
+	// 	const roll4d6DropWorst = () => {
+	// 		const minRoll = Math.min(...rolls);
+	// 		return rolls.reduce((accumulator, currentValue) => accumulator + currentValue, 0) - minRoll;
+	// 	};
+	// 	const randomizedStats: StatIndex = {
+	// 		[StatName.STR]: { raw: 10, bonus: 0 },
+	// 		[StatName.DEX]: { raw: 10, bonus: 0 },
+	// 		[StatName.CON]: { raw: 10, bonus: 0 },
+	// 		[StatName.INT]: { raw: 10, bonus: 0 },
+	// 		[StatName.WIS]: { raw: 10, bonus: 0 },
+	// 		[StatName.CHA]: { raw: 10, bonus: 0 },
+	// 	};
 
-		for (const stat in StatName) {
-			const statKey = stat as unknown as StatName;
-			const roll = roll4d6DropWorst();
-			const bonus = Math.floor((roll - 10) / 2);
-			if (randomizedStats[statKey]) {
-				randomizedStats[statKey].raw = roll;
-				randomizedStats[statKey].bonus = bonus;
-			} else {
-				randomizedStats[statKey] = {
-					raw: roll,
-					bonus: bonus,
-				};
-			}
-		}
+	// 	for (const stat in StatName) {
+	// 		const statKey = stat as unknown as StatName;
+	// 		const roll = roll4d6DropWorst();
+	// 		const bonus = Math.floor((roll - 10) / 2);
+	// 		if (randomizedStats[statKey]) {
+	// 			randomizedStats[statKey].raw = roll;
+	// 			randomizedStats[statKey].bonus = bonus;
+	// 		} else {
+	// 			randomizedStats[statKey] = {
+	// 				raw: roll,
+	// 				bonus: bonus,
+	// 			};
+	// 		}
+	// 	}
 
-		this.updateStatsAndSkills(randomizedStats, skillProficiencies);
-	}
+	// 	this.updateStatsAndSkills(randomizedStats, skillProficiencies);
+	// }
 }

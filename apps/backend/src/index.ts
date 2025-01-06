@@ -1,12 +1,9 @@
 import { Hono } from 'hono';
-import { Character, characterSchema } from './Character';
+import { Character } from './Character';
+import { Encounter } from './Encounter';
 import { zValidator } from '@hono/zod-validator';
 import { Ai } from '@cloudflare/workers-types';
-
-export interface Env {
-	CHARACTERS: DurableObjectNamespace<Character>;
-	AI: Ai;
-}
+import { CharacterSchema, CreateEncounterSchema } from './types';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -40,7 +37,7 @@ app.get('/characters/:characterName/image', async (c) => {
 	});
 });
 
-app.post('/character', zValidator('json', characterSchema), async (c) => {
+app.post('/character', zValidator('json', CharacterSchema), async (c) => {
 	const { name, alignment, stats, backStory, abilities, hitPoints, movementSpeed, physicalDescription, proficiencyBonus } =
 		c.req.valid('json');
 
@@ -55,6 +52,16 @@ app.post('/character', zValidator('json', characterSchema), async (c) => {
 	return c.text('Character created successfully', 201);
 });
 
+app.post('/encounter', zValidator('json', CreateEncounterSchema), async (c) => {
+	const { name, arealDescription, encounterDescription } = c.req.valid('json');
+
+	const id = c.env.ENCOUNTERS.idFromName(name);
+	const stub = c.env.ENCOUNTERS.get(id);
+	await stub.initializeEncounter(name, arealDescription, encounterDescription);
+
+	return c.json({ success: true, encounterID: id.toString() });
+});
+
 export default app;
 
-export { Character };
+export { Character, Encounter };

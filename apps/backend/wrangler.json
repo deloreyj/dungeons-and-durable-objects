@@ -1,0 +1,27 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "dnd-prototype",
+	"main": "src/index.ts",
+	"compatibility_date": "2025-01-06",
+	"ai": {
+		"binding": "AI"
+	},
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "CHARACTERS",
+				"class_name": "Character"
+			},
+			{
+				"name": "ENCOUNTERS",
+				"class_name": "Encounter"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": ["Character", "Encounter"]
+		}
+	]
+}

@@ -1,0 +1,7 @@
+Never use the fetch handler for durable objects. Always use RPC methods and access them directliy.
+
+Always use shadcn/ui components when writing React components. If I need to install anything, instruct me to do that. 
+
+When installing dependencies use `pnpm`
+
+When installing shadcn/ui components use `pnpm dlx shadcn@latest add`
