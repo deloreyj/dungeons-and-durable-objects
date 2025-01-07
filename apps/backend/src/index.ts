@@ -38,18 +38,17 @@ app.get('/characters/:characterName/image', async (c) => {
 });
 
 app.post('/character', async (c) => {
-	const { name, alignment, stats, backStory, abilities, hitPoints, movementSpeed, physicalDescription, proficiencyBonus } =
-		await c.req.json();
+	const { name, backstory, alignment, appearance, characterClass, race } = await c.req.json();
 
 	if (!name) {
 		return c.text('Character name is required', 400);
 	}
 
 	const id = c.env.CHARACTERS.idFromName(name);
-	const stub = await c.env.CHARACTERS.get(id);
-	await stub.initialize(name, alignment, stats, backStory, abilities, hitPoints, movementSpeed, physicalDescription, proficiencyBonus);
+	const stub = c.env.CHARACTERS.get(id);
+	await stub.initialize(name, backstory, alignment, appearance, characterClass, race);
 
-	return c.text('Character created successfully', 201);
+	return c.json({ success: true });
 });
 
 app.post('/encounter', zValidator('json', CreateEncounterSchema), async (c) => {
