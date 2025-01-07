@@ -62,6 +62,10 @@ export class Encounter extends DurableObject<Env> {
 		this.env = env;
 	}
 
+	async getEncounterState(): Promise<EncounterState> {
+		return (await this.storage.list()) as unknown as EncounterState;
+	}
+
 	async initializeEncounter(name: string, arealDescription: string, encounterDescription: string) {
 		const defaultMapSize = { width: 20, height: 20 };
 		const emptyMap = Array(defaultMapSize.height)

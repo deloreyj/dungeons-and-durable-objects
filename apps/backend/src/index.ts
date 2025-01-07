@@ -3,7 +3,7 @@ import { Character } from './Character';
 import { Encounter } from './Encounter';
 import { zValidator } from '@hono/zod-validator';
 import { Ai } from '@cloudflare/workers-types';
-import { CharacterSchema, CreateEncounterSchema } from './types';
+import { CreateEncounterSchema } from './types';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -17,7 +17,7 @@ app.get('/character', async (c) => {
 	const id = c.env.CHARACTERS.idFromName(characterName);
 	const stub = await c.env.CHARACTERS.get(id);
 	stub.initialize("Lil' Tex", 'Chaotic Evil', {}, 'Mock Backstory', {}, 10, 30, 'I look like woody from toy story', 2);
-	return c.json(await stub.toJSON());
+	return c.json(await stub.getStats());
 });
 
 app.get('/characters/:characterName/image', async (c) => {
@@ -28,7 +28,7 @@ app.get('/characters/:characterName/image', async (c) => {
 
 	const id = c.env.CHARACTERS.idFromName(characterName);
 	const stub = await c.env.CHARACTERS.get(id);
-	const image = await stub.getImage();
+	const image = (await stub.getImage()) as unknown as AiTextToImageOutput;
 	return new Response(image, {
 		status: 200,
 		headers: {
@@ -37,9 +37,9 @@ app.get('/characters/:characterName/image', async (c) => {
 	});
 });
 
-app.post('/character', zValidator('json', CharacterSchema), async (c) => {
+app.post('/character', async (c) => {
 	const { name, alignment, stats, backStory, abilities, hitPoints, movementSpeed, physicalDescription, proficiencyBonus } =
-		c.req.valid('json');
+		await c.req.json();
 
 	if (!name) {
 		return c.text('Character name is required', 400);
