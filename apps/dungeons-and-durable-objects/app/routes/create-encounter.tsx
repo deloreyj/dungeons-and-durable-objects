@@ -3,26 +3,53 @@ import { json } from '@remix-run/node';
 import type { LoaderFunctionArgs } from '@remix-run/node';
 import { Button } from '~/components/ui/button';
 import { Card, CardHeader, CardContent } from '~/components/ui/card';
+import { useEffect } from 'react';
 
 interface EncounterResponse {
 	success: boolean;
 	encounterID: string;
+	encounterName: string;
 }
 
 export async function loader({ context }: LoaderFunctionArgs) {
-	const response = await fetch(`${context.cloudflare.env.API_BASE_URL}/encounter`, {
+	console.log('Creating encounter');
+	console.log('Context:', context);
+	const url = `${context.cloudflare.env.API_BASE_URL}/encounter`;
+	console.log('URL:', url);
+	const response = await fetch(url, {
 		method: 'POST',
 		headers: {
 			'Content-Type': 'application/json',
 		},
 	});
 
+	console.log('Response:', response.ok);
+	console.log('Response:', response.status);
+	console.log('Response:', response.statusText);
+
 	const data = (await response.json()) as EncounterResponse;
+	console.log('Data:', data);
 	return json(data);
 }
 
 export default function CreateEncounter() {
 	const data = useLoaderData<typeof loader>();
+
+	useEffect(() => {
+		if (data?.encounterID) {
+			const encounters = JSON.parse(localStorage.getItem('encounters') || '[]');
+			const encounterExists = encounters.some((encounter: { id: string }) => encounter.id === data.encounterID);
+			if (!encounterExists) {
+				const encounterInfo = {
+					id: data.encounterID,
+					name: data.encounterName,
+					status: 'PREPARING' as const,
+				};
+				encounters.push(encounterInfo);
+				localStorage.setItem('encounters', JSON.stringify(encounters));
+			}
+		}
+	}, [data.encounterID, data.encounterName]);
 
 	if (!data?.encounterID) {
 		return <div>Error creating encounter</div>;

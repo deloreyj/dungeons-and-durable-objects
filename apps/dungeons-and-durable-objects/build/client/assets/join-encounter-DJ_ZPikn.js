@@ -1,0 +1,1 @@
+import{n,z as t}from"./components-CR-84NmD.js";import{B as o}from"./button-BQyo11lN.js";function i(){return n.jsxs("div",{className:"p-4",children:[n.jsx(t,{to:"/",className:"mb-8 inline-block",children:n.jsx(o,{variant:"outline",children:"← Back"})}),n.jsx("h1",{className:"text-4xl font-bold mt-4",children:"Join Encounter"})]})}export{i as default};

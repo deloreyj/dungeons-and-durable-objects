@@ -11,6 +11,13 @@ interface EncounterState {
 	status: 'PREPARING' | 'IN_PROGRESS' | 'COMPLETED';
 }
 
+interface CharacterState {
+	id: string;
+	name: string;
+	race: string;
+	class: string;
+}
+
 function MyEncounters() {
 	const [encounters, setEncounters] = useState<EncounterState[]>([]);
 
@@ -34,6 +41,41 @@ function MyEncounters() {
 								<div className="flex justify-between items-center">
 									<span className="font-medium">{encounter.name}</span>
 									<span className="text-sm text-gray-500">{encounter.status}</span>
+								</div>
+							</Link>
+						))}
+					</div>
+				</ScrollArea>
+			</CardContent>
+		</Card>
+	);
+}
+
+function MyCharacters() {
+	const [characters, setCharacters] = useState<CharacterState[]>([]);
+
+	useEffect(() => {
+		const savedCharacters = JSON.parse(localStorage.getItem('characters') || '[]');
+		setCharacters(savedCharacters);
+	}, []);
+
+	if (characters.length === 0) return null;
+
+	return (
+		<Card className="w-full max-w-md mt-8">
+			<CardHeader>
+				<h2 className="text-xl font-semibold">My Characters</h2>
+			</CardHeader>
+			<CardContent>
+				<ScrollArea className="h-[300px]">
+					<div className="space-y-2">
+						{characters.map((character) => (
+							<Link key={character.id} to={`/character/${character.id}`} className="block p-3 hover:bg-gray-100 rounded-lg">
+								<div className="flex justify-between items-center">
+									<span className="font-medium">{character.name}</span>
+									<span className="text-sm text-gray-500">
+										{character.race} {character.class}
+									</span>
 								</div>
 							</Link>
 						))}
@@ -70,6 +112,7 @@ export default function Index() {
 				</Link>
 			</div>
 			<MyEncounters />
+			<MyCharacters />
 		</div>
 	);
 }

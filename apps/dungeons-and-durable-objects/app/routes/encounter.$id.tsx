@@ -4,7 +4,6 @@ import type { LoaderFunctionArgs } from '@remix-run/node';
 import { Card, CardHeader, CardContent } from '~/components/ui/card';
 import { Button } from '~/components/ui/button';
 import { ScrollArea } from '~/components/ui/scroll-area';
-import { useEffect } from 'react';
 
 interface Position {
 	x: number;
@@ -86,7 +85,7 @@ function MapCell({ cell, character }: { cell: TerrainCell; character?: Encounter
 
 	const getTooltip = () => {
 		if (character) {
-			return `${character.name} (${character.race} ${character.class})`;
+			return `${character.name} (${character.race} ${character.class || ''})`;
 		}
 		const terrainText = cell.terrain.charAt(0).toUpperCase() + cell.terrain.slice(1);
 		if (!cell.cover || cell.cover === 'none') {
@@ -104,7 +103,7 @@ function MapCell({ cell, character }: { cell: TerrainCell; character?: Encounter
 			className={`aspect-square border border-gray-100 ${bgColor} ${coverStyle} flex items-center justify-center relative`}
 			title={getTooltip()}
 		>
-			{character && (
+			{character && character.name && (
 				<Link to={`/character/${character.id}`} className={`text-xl font-bold ${characterColor}`}>
 					{character.name[0].toUpperCase()}
 				</Link>
@@ -185,20 +184,6 @@ function CharacterList({ characters, team }: { characters: EncounterCharacter[];
 
 export default function Encounter() {
 	const state = useLoaderData<typeof loader>();
-
-	useEffect(() => {
-		const encounters = JSON.parse(localStorage.getItem('encounters') || '[]');
-		const existingIndex = encounters.findIndex((e: { id: string }) => e.id === state.id);
-		const encounterInfo = { id: state.id, name: state.name };
-
-		if (existingIndex >= 0) {
-			encounters[existingIndex] = encounterInfo;
-		} else {
-			encounters.push(encounterInfo);
-		}
-
-		localStorage.setItem('encounters', JSON.stringify(encounters));
-	}, [state.id, state.name]);
 
 	if (!state) {
 		return <div>Loading...</div>;

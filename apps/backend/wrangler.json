@@ -3,8 +3,12 @@
 	"name": "dnd-prototype",
 	"main": "src/index.ts",
 	"compatibility_date": "2025-01-06",
+	"account_id": "2adae97a1a43673cccfd751f5c705ea2",
 	"ai": {
 		"binding": "AI"
+	},
+	"observability": {
+		"enabled": true
 	},
 	"durable_objects": {
 		"bindings": [

@@ -6,10 +6,14 @@ import { Input } from '~/components/ui/input';
 import { Textarea } from '~/components/ui/textarea';
 import { Label } from '~/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '~/components/ui/select';
+import { useEffect } from 'react';
 
 type ActionData = {
 	success: boolean;
 	characterId: string;
+	characterName: string;
+	characterRace: string;
+	characterClass: string;
 };
 
 export async function action({ request, context }: ActionFunctionArgs) {
@@ -41,6 +45,23 @@ export async function action({ request, context }: ActionFunctionArgs) {
 
 export default function CreateCharacter() {
 	const actionData = useActionData<ActionData>();
+
+	useEffect(() => {
+		if (actionData?.success && actionData?.characterId) {
+			const characters = JSON.parse(localStorage.getItem('characters') || '[]');
+			const characterExists = characters.some((char: { id: string }) => char.id === actionData.characterId);
+			if (!characterExists) {
+				const characterInfo = {
+					id: actionData.characterId,
+					name: actionData.characterName,
+					race: actionData.characterRace,
+					class: actionData.characterClass,
+				};
+				characters.push(characterInfo);
+				localStorage.setItem('characters', JSON.stringify(characters));
+			}
+		}
+	}, [actionData?.success, actionData?.characterId, actionData?.characterName, actionData?.characterRace, actionData?.characterClass]);
 
 	return (
 		<div className="min-h-screen bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">

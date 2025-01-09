@@ -2,6 +2,8 @@
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "dungeons-and-durable-objects",
 	"compatibility_date": "2024-12-30",
+	"account_id": "2adae97a1a43673cccfd751f5c705ea2",
+	"compatibility_flags": ["nodejs_compat"],
 	"main": "./server.ts",
 	"assets": {
 		"directory": "./build/client"
