@@ -17,7 +17,7 @@
 		"jest": "^29.7.0",
 		"ts-jest": "^29.2.5",
 		"typescript": "^5.7.2",
-		"wrangler": "^3.99.0"
+		"wrangler": "^3.100.0"
 	},
 	"dependencies": {
 		"@hono/zod-validator": "^0.4.2",

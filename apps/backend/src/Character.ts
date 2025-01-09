@@ -8,8 +8,12 @@ import {
 	getMovementSpeed,
 	getStartingArmor,
 	randomizeStats,
+	getDefaultSkills,
+	calculateSkillCheck,
+	SKILL_ABILITY_MAPPING,
+	getClassDefaults,
 } from './utils';
-import { Alignment, ArmorData, CharacterClass, Condition, Race, SavingThrows, Stats } from './types';
+import { CharacterState, Condition, Skills, DamageRoll, Action } from './types';
 
 /**
  * Represents a D&D 5e character as a Durable Object
@@ -20,6 +24,7 @@ export class Character extends DurableObject<Env> {
 	private dmConnection: WebSocket | null = null;
 	private playerConnection: WebSocket | null = null;
 	private encounterStub: DurableObjectStub<Encounter> | null = null;
+	private image: string | null = null;
 
 	constructor(state: DurableObjectState, env: Env) {
 		super(state, env);
@@ -34,14 +39,38 @@ export class Character extends DurableObject<Env> {
 	 * @param characterClass D&D class
 	 * @param race Character race
 	 */
-	async initialize(name: string, backstory: string, alignment: Alignment, appearance: string, characterClass: CharacterClass, race: Race) {
-		const hitDie = getHitDice(characterClass);
-		const initialStats = await randomizeStats();
-		const initialHp = hitDie + getModifier(initialStats.constitution);
+	async initialize(
+		name: string,
+		backstory: string,
+		alignment: CharacterState['alignment'],
+		appearance: string,
+		race: CharacterState['race'],
+		characterClass?: CharacterState['characterClass'],
+		stats?: CharacterState['stats'],
+		hp?: CharacterState['currentHp'],
+		ac?: CharacterState['armor'],
+		speed?: CharacterState['speed'],
+		skillModifiers?: Partial<Skills>,
+		actions?: Action[],
+		bonusActions?: Action[],
+		playStylePreference?: string
+	) {
+		const initialStats = stats || (await randomizeStats());
+		const initialHp = hp || getHitDice(characterClass) + getModifier(initialStats.constitution);
+		const startingArmor = ac || getStartingArmor(characterClass);
+		const classDefaults = getClassDefaults(characterClass);
 
-		const startingArmor = getStartingArmor(characterClass);
-		const savingThrows = getClassSavingThrows(characterClass);
-		const level = 1;
+		// Set up skills with proficiencies from class defaults
+		const defaultSkills = getDefaultSkills();
+		for (const skillName of classDefaults.proficiencies.skills) {
+			if (skillName in defaultSkills) {
+				defaultSkills[skillName as keyof Skills].proficient = true;
+			}
+		}
+		const skills = {
+			...defaultSkills,
+			...skillModifiers,
+		};
 
 		await this.ctx.storage.put({
 			name,
@@ -56,12 +85,17 @@ export class Character extends DurableObject<Env> {
 			maxHp: initialHp,
 			inventory: [],
 			conditions: new Set(),
-			speed: getMovementSpeed(race),
+			speed: speed || getMovementSpeed(race),
 			initiativeModifier: getModifier(initialStats.dexterity),
 			armor: startingArmor,
-			savingThrows,
-			proficiencyBonus: calculateProficiencyBonus(level),
-			level,
+			savingThrows: getClassSavingThrows(characterClass),
+			proficiencyBonus: calculateProficiencyBonus(1),
+			level: 1,
+			skills,
+			image: null,
+			actions: actions || classDefaults.actions,
+			bonusActions: bonusActions || classDefaults.bonusActions,
+			playStylePreference: playStylePreference || 'balanced',
 		});
 	}
 
@@ -72,8 +106,8 @@ export class Character extends DurableObject<Env> {
 	 * @returns The total AC value
 	 */
 	async calculateAC(): Promise<number> {
-		const armor = (await this.ctx.storage.get('armor')) as ArmorData;
-		const stats = (await this.ctx.storage.get('stats')) as Stats;
+		const armor = (await this.ctx.storage.get('armor')) as CharacterState['armor'];
+		const stats = (await this.ctx.storage.get('stats')) as CharacterState['stats'];
 
 		const dexMod = getModifier(stats.dexterity);
 
@@ -102,10 +136,12 @@ export class Character extends DurableObject<Env> {
 	 * @param ability The ability to make the saving throw with
 	 * @returns Object containing roll result and critical status
 	 */
-	async rollSavingThrow(ability: keyof SavingThrows): Promise<{ roll: number; critSuccess: boolean; critFailure?: boolean }> {
-		const stats = (await this.ctx.storage.get('stats')) as Stats;
-		const savingThrows = (await this.ctx.storage.get('savingThrows')) as SavingThrows;
-		const proficiencyBonus = (await this.ctx.storage.get('proficiencyBonus')) as number;
+	async rollSavingThrow(
+		ability: keyof CharacterState['savingThrows']
+	): Promise<{ roll: number; critSuccess: boolean; critFailure?: boolean }> {
+		const stats = (await this.ctx.storage.get('stats')) as CharacterState['stats'];
+		const savingThrows = (await this.ctx.storage.get('savingThrows')) as CharacterState['savingThrows'];
+		const proficiencyBonus = (await this.ctx.storage.get('proficiencyBonus')) as CharacterState['proficiencyBonus'];
 
 		const roll = Math.floor(Math.random() * 20) + 1;
 		const modifier = getModifier(stats[ability]);
@@ -129,6 +165,121 @@ export class Character extends DurableObject<Env> {
 		const initiativeRoll = roll + initiativeModifier;
 		await this.ctx.storage.put('initiativeRoll', initiativeRoll);
 		return initiativeRoll;
+	}
+
+	/**
+	 * Performs an attack action
+	 * @param actionName Name of the action to perform
+	 * @param target Target of the action (if applicable)
+	 * @returns Result of the action
+	 */
+	async performAction(actionName: string, target?: string) {
+		const actions = (await this.ctx.storage.get('actions')) as CharacterState['actions'];
+		const action = actions.find((a) => a.name === actionName);
+
+		if (!action) throw new Error(`Action ${actionName} not found`);
+
+		if (action.type === 'weapon') {
+			const attackRoll = Math.floor(Math.random() * 20) + 1;
+			const isCrit = attackRoll === 20;
+			const isCritFail = attackRoll === 1;
+			const total = attackRoll + action.attackBonus;
+
+			// Calculate damage
+			const damage = this.rollDamage(action.damage, isCrit);
+
+			return {
+				type: 'attack',
+				attackRoll: total,
+				damage,
+				isCrit,
+				isCritFail,
+				target,
+			};
+		}
+
+		if (action.type === 'special') {
+			if (action.savingThrow) {
+				const dc = action.savingThrow.dc;
+				return {
+					type: 'special',
+					savingThrow: {
+						dc,
+						ability: action.savingThrow.ability,
+					},
+					damage: action.damage ? this.rollDamage(action.damage, false) : undefined,
+					description: action.description,
+					target,
+				};
+			}
+
+			return {
+				type: 'special',
+				description: action.description,
+				damage: action.damage ? this.rollDamage(action.damage, false) : undefined,
+				target,
+			};
+		}
+	}
+
+	/**
+	 * Performs a bonus action
+	 * @param actionName Name of the bonus action to perform
+	 * @param target Target of the action (if applicable)
+	 * @returns Result of the bonus action
+	 */
+	async performBonusAction(actionName: string, target?: string) {
+		const bonusActions = (await this.ctx.storage.get('bonusActions')) as CharacterState['bonusActions'];
+		const action = bonusActions.find((a) => a.name === actionName);
+
+		if (!action) throw new Error(`Bonus action ${actionName} not found`);
+
+		return this.performAction(actionName, target);
+	}
+
+	/**
+	 * Rolls damage for an attack
+	 * @param damageRoll Damage roll configuration
+	 * @param isCrit Whether the attack was a critical hit
+	 * @returns Total damage and breakdown
+	 */
+	private rollDamage(damageRoll: DamageRoll, isCrit: boolean) {
+		const diceCount = isCrit ? damageRoll.diceCount * 2 : damageRoll.diceCount;
+		let total = damageRoll.modifier;
+
+		const rolls: number[] = [];
+		for (let i = 0; i < diceCount; i++) {
+			rolls.push(Math.floor(Math.random() * damageRoll.diceType) + 1);
+		}
+
+		total += rolls.reduce((sum, roll) => sum + roll, 0);
+
+		return {
+			total,
+			rolls,
+			type: damageRoll.type,
+			modifier: damageRoll.modifier,
+		};
+	}
+
+	/**
+	 * Adds an action to the character
+	 * @param action Action to add
+	 */
+	async addAction(action: CharacterState['actions'][number]) {
+		const actions = (await this.ctx.storage.get('actions')) as CharacterState['actions'];
+		actions.push(action);
+		await this.ctx.storage.put('actions', actions);
+	}
+
+	/**
+	 * Adds a bonus action to the character
+	 * @param action Bonus action to add
+	 */
+	async addBonusAction(action: CharacterState['bonusActions'][number]) {
+		const bonusActions = (await this.ctx.storage.get('bonusActions')) as CharacterState['bonusActions'];
+		bonusActions.push(action);
+		await this.ctx.storage.put('bonusActions', bonusActions);
 	}
 
 	// HEALTH AND CONDITIONS
@@ -176,7 +327,7 @@ export class Character extends DurableObject<Env> {
 	 * @param condition The condition to apply
 	 */
 	async addCondition(condition: Condition) {
-		const conditions = (await this.ctx.storage.get('conditions')) as Set<Condition>;
+		const conditions = (await this.ctx.storage.get('conditions')) as CharacterState['conditions'];
 		conditions.add(condition);
 		await this.ctx.storage.put('conditions', conditions);
 		await this.broadcastState();
@@ -187,7 +338,7 @@ export class Character extends DurableObject<Env> {
 	 * @param condition The condition to remove
 	 */
 	async removeCondition(condition: Condition) {
-		const conditions = (await this.ctx.storage.get('conditions')) as Set<Condition>;
+		const conditions = (await this.ctx.storage.get('conditions')) as CharacterState['conditions'];
 		conditions.delete(condition);
 		await this.ctx.storage.put('conditions', conditions);
 		await this.broadcastState();
@@ -200,7 +351,7 @@ export class Character extends DurableObject<Env> {
 	 * @param item Item to add
 	 */
 	async addItem(item: string) {
-		const inventory = (await this.ctx.storage.get('inventory')) as string[];
+		const inventory = (await this.ctx.storage.get('inventory')) as CharacterState['inventory'];
 		inventory.push(item);
 		await this.ctx.storage.put('inventory', inventory);
 		await this.broadcastState();
@@ -211,7 +362,7 @@ export class Character extends DurableObject<Env> {
 	 * @param item Item to remove
 	 */
 	async removeItem(item: string) {
-		const inventory = (await this.ctx.storage.get('inventory')) as string[];
+		const inventory = (await this.ctx.storage.get('inventory')) as CharacterState['inventory'];
 		const index = inventory.indexOf(item);
 		if (index > -1) {
 			inventory.splice(index, 1);
@@ -291,16 +442,64 @@ export class Character extends DurableObject<Env> {
 	}
 
 	/**
+	 * Handles WebSocket setup and message routing
+	 * @param socket WebSocket server instance
+	 * @param type Connection type
+	 */
+	private async handleWebSocket(socket: WebSocket, type: 'player' | 'dm' | 'encounter') {
+		socket.accept();
+
+		switch (type) {
+			case 'player':
+				this.playerConnection = socket;
+				break;
+			case 'dm':
+				this.dmConnection = socket;
+				break;
+			default:
+				this.connections.add(socket);
+		}
+
+		socket.addEventListener('message', async (event) => {
+			try {
+				await this.handleMessage(event.data, type);
+			} catch (error) {
+				console.error('Error handling message:', error);
+			}
+		});
+
+		socket.addEventListener('close', () => {
+			switch (type) {
+				case 'player':
+					this.playerConnection = null;
+					break;
+				case 'dm':
+					this.dmConnection = null;
+					break;
+				default:
+					this.connections.delete(socket);
+			}
+		});
+
+		// Send initial state
+		await this.broadcastState();
+	}
+
+	/**
 	 * Broadcasts a message to the encounter
 	 * @param message Message to broadcast
 	 */
 	private async broadcastToEncounter(message: string) {
 		if (this.encounterStub) {
 			const id = (await this.ctx.storage.get('id')) as string;
-			await this.encounterStub.broadcast({
-				type: 'character_message',
-				characterId: id,
-				content: message,
+			// Send message to encounter through RPC
+			await this.encounterStub.fetch('http://fake/broadcast', {
+				method: 'POST',
+				body: JSON.stringify({
+					type: 'character_message',
+					characterId: id,
+					content: message,
+				}),
 			});
 		}
 	}
@@ -318,20 +517,14 @@ export class Character extends DurableObject<Env> {
 		return 'Generated response based on character personality';
 	}
 
-	async getImage(): Promise<AiTextToImageOutput> {
-		const alignment = (await this.ctx.storage.get('alignment')) as Alignment;
-		const physicalDescription = (await this.ctx.storage.get('physicalDescription')) as string;
-		const name = (await this.ctx.storage.get('name')) as string;
+	async setImage(imageKey: string) {
+		console.log('Setting image key', imageKey);
+		await this.ctx.storage.put('imageKey', imageKey);
+	}
 
-		const inputs = {
-			prompt: `Dungeons and Dragons character named ${name} 
-			Physical description: ${physicalDescription} 
-			Alignment: ${alignment}`,
-		};
-
-		const response = await this.env.AI.run('@cf/bytedance/stable-diffusion-xl-lightning', inputs);
-
-		return response;
+	async getImage() {
+		const imageKey = (await this.ctx.storage.get('imageKey')) as string | null;
+		return imageKey;
 	}
 
 	// STATE QUERIES
@@ -340,19 +533,35 @@ export class Character extends DurableObject<Env> {
 	 * Retrieves current character stats
 	 * @returns Object containing current stats and conditions
 	 */
-	async getStats() {
-		const [stats, currentHp, maxHp, conditions] = await Promise.all([
-			this.ctx.storage.get('stats'),
-			this.ctx.storage.get('currentHp'),
-			this.ctx.storage.get('maxHp'),
-			this.ctx.storage.get('conditions'),
-		]);
+	async getCharacterState(): Promise<CharacterState> {
+		const state = (await this.ctx.storage.list()) as Map<string, unknown>;
+		const stateObject = Object.fromEntries(state);
+		return stateObject as CharacterState;
+	}
+
+	/**
+	 * Makes a skill check for a given skill
+	 * @param skillName The name of the skill to check
+	 * @returns Object containing roll result and critical status
+	 */
+	async rollSkillCheck(
+		skillName: keyof typeof SKILL_ABILITY_MAPPING
+	): Promise<{ roll: number; critSuccess: boolean; critFailure: boolean }> {
+		const stats = (await this.ctx.storage.get('stats')) as CharacterState['stats'];
+		const skills = (await this.ctx.storage.get('skills')) as CharacterState['skills'];
+		const level = (await this.ctx.storage.get('level')) as number;
+
+		const abilityName = SKILL_ABILITY_MAPPING[skillName];
+		const abilityScore = stats[abilityName];
+		const skill = skills[skillName];
+
+		const d20Roll = Math.floor(Math.random() * 20) + 1;
+		const total = calculateSkillCheck(abilityScore, skill, level);
 
 		return {
-			stats,
-			currentHp,
-			maxHp,
-			conditions: Array.from(conditions as Set<Condition>),
+			roll: d20Roll + total,
+			critSuccess: d20Roll === 20,
+			critFailure: d20Roll === 1,
 		};
 	}
 }

@@ -7,6 +7,11 @@ import { Textarea } from '~/components/ui/textarea';
 import { Label } from '~/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '~/components/ui/select';
 
+type ActionData = {
+	success: boolean;
+	characterId: string;
+};
+
 export async function action({ request, context }: ActionFunctionArgs) {
 	const formData = await request.formData();
 	const name = formData.get('name') as string;
@@ -35,7 +40,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
 }
 
 export default function CreateCharacter() {
-	const actionData = useActionData<typeof action>();
+	const actionData = useActionData<ActionData>();
 
 	return (
 		<div className="min-h-screen bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
@@ -87,17 +92,9 @@ export default function CreateCharacter() {
 									</SelectTrigger>
 									<SelectContent>
 										<SelectItem value="Barbarian">Barbarian</SelectItem>
-										<SelectItem value="Bard">Bard</SelectItem>
 										<SelectItem value="Cleric">Cleric</SelectItem>
-										<SelectItem value="Druid">Druid</SelectItem>
 										<SelectItem value="Fighter">Fighter</SelectItem>
-										<SelectItem value="Monk">Monk</SelectItem>
-										<SelectItem value="Paladin">Paladin</SelectItem>
-										<SelectItem value="Ranger">Ranger</SelectItem>
-										<SelectItem value="Rogue">Rogue</SelectItem>
 										<SelectItem value="Sorcerer">Sorcerer</SelectItem>
-										<SelectItem value="Warlock">Warlock</SelectItem>
-										<SelectItem value="Wizard">Wizard</SelectItem>
 									</SelectContent>
 								</Select>
 							</div>
@@ -152,7 +149,17 @@ export default function CreateCharacter() {
 						</Form>
 
 						{actionData?.success && (
-							<div className="mt-6 p-4 bg-green-50 border border-green-200 text-green-700 rounded-lg">Character created successfully!</div>
+							<div className="mt-6 p-4 bg-green-50 border border-green-200 text-green-700 rounded-lg">
+								<p className="mb-4">
+									Character created successfully! Your character ID is:{' '}
+									<code className="bg-green-100 px-2 py-1 rounded">{actionData.characterId}</code>
+								</p>
+								<Link to={`/character/${actionData.characterId}`}>
+									<Button variant="outline" className="w-full">
+										View Character Sheet
+									</Button>
+								</Link>
+							</div>
 						)}
 					</CardContent>
 				</Card>

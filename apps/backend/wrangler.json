@@ -23,5 +23,22 @@
 			"tag": "v1",
 			"new_sqlite_classes": ["Character", "Encounter"]
 		}
+	],
+	"r2_buckets": [
+		{
+			"bucket_name": "encounter-images",
+			"binding": "ENCOUNTER_IMAGES"
+		},
+		{
+			"bucket_name": "character-images",
+			"binding": "CHARACTER_IMAGES"
+		}
+	],
+	"workflows": [
+		{
+			"name": "generate-character-image",
+			"binding": "GENERATE_IMAGE_WORKFLOW",
+			"class_name": "GenerateCharacterImageWorkflow"
+		}
 	]
 }
