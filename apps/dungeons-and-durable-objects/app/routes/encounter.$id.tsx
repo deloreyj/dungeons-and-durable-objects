@@ -4,6 +4,9 @@ import type { LoaderFunctionArgs } from '@remix-run/node';
 import { Card, CardHeader, CardContent } from '~/components/ui/card';
 import { Button } from '~/components/ui/button';
 import { ScrollArea } from '~/components/ui/scroll-area';
+import { WebSocket } from 'partysocket';
+import { useEffect, useState, useRef } from 'react';
+import { Textarea } from '~/components/ui/textarea';
 
 interface Position {
 	x: number;
@@ -40,6 +43,13 @@ interface EncounterState {
 	status: 'PREPARING' | 'IN_PROGRESS' | 'COMPLETED';
 }
 
+interface ChatMessage {
+	id: string;
+	characterName: string;
+	content: string;
+	timestamp: number;
+}
+
 export async function loader({ params, context }: LoaderFunctionArgs) {
 	const response = await fetch(`${context.cloudflare.env.API_BASE_URL}/encounter/${params.id}`, {
 		method: 'GET',
@@ -58,7 +68,9 @@ export async function loader({ params, context }: LoaderFunctionArgs) {
 		imageUrl: `${context.cloudflare.env.API_BASE_URL}/characters/${encodeURIComponent(character.id)}/image`,
 	}));
 
-	const finalData = { ...data, characters: charactersWithImages };
+	const websocketUrl = `${context.cloudflare.env.WS_BASE_URL}/encounter/${params.id}/ws`;
+
+	const finalData = { ...data, characters: charactersWithImages, websocketUrl };
 
 	return json(finalData);
 }
@@ -182,8 +194,174 @@ function CharacterList({ characters, team }: { characters: EncounterCharacter[];
 	);
 }
 
+function EncounterChat({ ws }: { ws: WebSocket | null }) {
+	const [messages, setMessages] = useState<ChatMessage[]>([]);
+	const [message, setMessage] = useState('');
+	const [isOpen, setIsOpen] = useState(false);
+	const [userName, setUserName] = useState('');
+	const [isNameSet, setIsNameSet] = useState(false);
+	const textareaRef = useRef<HTMLTextAreaElement>(null);
+	const scrollAreaRef = useRef<HTMLDivElement>(null);
+
+	useEffect(() => {
+		if (!ws) return;
+
+		const handleMessage = (event: MessageEvent) => {
+			const data = JSON.parse(event.data);
+			if (data.type === 'chat') {
+				setMessages((prev) => [...prev, data.message]);
+				// Scroll to bottom after new message
+				setTimeout(() => {
+					if (scrollAreaRef.current) {
+						scrollAreaRef.current.scrollTop = scrollAreaRef.current.scrollHeight;
+					}
+				}, 0);
+			} else if (data.type === 'chat_history') {
+				setMessages(data.messages);
+				// Scroll to bottom after loading history
+				setTimeout(() => {
+					if (scrollAreaRef.current) {
+						scrollAreaRef.current.scrollTop = scrollAreaRef.current.scrollHeight;
+					}
+				}, 0);
+			}
+		};
+
+		ws.addEventListener('message', handleMessage);
+		return () => ws.removeEventListener('message', handleMessage);
+	}, [ws]);
+
+	const handleSetName = (e: React.FormEvent) => {
+		e.preventDefault();
+		if (userName.trim()) {
+			setIsNameSet(true);
+			// Initialize chat after setting name
+			if (ws) {
+				ws.send(JSON.stringify({ type: 'initialize_chat' }));
+			}
+			// Focus textarea after a short delay to ensure it's mounted
+			setTimeout(() => {
+				textareaRef.current?.focus();
+			}, 0);
+		}
+	};
+
+	const sendMessage = (e?: React.FormEvent) => {
+		e?.preventDefault();
+		if (!ws || !message.trim() || !isNameSet) return;
+
+		ws.send(
+			JSON.stringify({
+				type: 'chat',
+				content: message,
+				userName,
+			})
+		);
+		setMessage('');
+	};
+
+	const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+		if (e.key === 'Enter' && !e.shiftKey) {
+			e.preventDefault();
+			sendMessage();
+		}
+	};
+
+	return (
+		<div className="fixed bottom-4 right-4 z-50">
+			<Button onClick={() => setIsOpen(!isOpen)} variant="outline" className="mb-2 w-full">
+				{isOpen ? 'Hide' : 'Show'} Encounter Chat
+			</Button>
+			{isOpen && (
+				<Card className="flex flex-col w-[350px] h-[400px]">
+					<CardHeader className="py-2 px-4 border-b shrink-0">
+						<h2 className="text-sm font-semibold">Chat</h2>
+					</CardHeader>
+					<CardContent className="p-0 flex flex-col h-[calc(400px-3rem)]">
+						{!isNameSet ? (
+							<form onSubmit={handleSetName} className="p-4">
+								<div className="space-y-4">
+									<div className="space-y-2">
+										<label htmlFor="userName" className="text-sm font-medium">
+											Enter your name to join the chat
+										</label>
+										<input
+											type="text"
+											id="userName"
+											value={userName}
+											onChange={(e) => setUserName(e.target.value)}
+											className="w-full px-3 py-2 border rounded-md text-sm"
+											placeholder="Your name"
+											required
+										/>
+									</div>
+									<Button type="submit" className="w-full">
+										Join Chat
+									</Button>
+								</div>
+							</form>
+						) : (
+							<>
+								<div ref={scrollAreaRef} className="flex-1 overflow-y-auto p-4">
+									<div className="space-y-4">
+										{messages.map((msg) => (
+											<div key={msg.id} className="space-y-1">
+												<div className="text-sm font-medium">{msg.characterName}</div>
+												<div className="text-sm text-gray-600 whitespace-pre-wrap">{msg.content}</div>
+											</div>
+										))}
+									</div>
+								</div>
+								<div className="p-4 border-t mt-auto">
+									<form onSubmit={sendMessage} className="flex gap-2">
+										<Textarea
+											ref={textareaRef}
+											value={message}
+											onChange={(e) => setMessage(e.target.value)}
+											onKeyDown={handleKeyDown}
+											placeholder="Type your message..."
+											className="resize-none min-h-[2.5rem] h-[2.5rem]"
+											rows={1}
+										/>
+										<Button type="submit" size="sm">
+											Send
+										</Button>
+									</form>
+								</div>
+							</>
+						)}
+					</CardContent>
+				</Card>
+			)}
+		</div>
+	);
+}
+
 export default function Encounter() {
 	const state = useLoaderData<typeof loader>();
+	const [ws, setWs] = useState<WebSocket | null>(null);
+
+	useEffect(() => {
+		// Only create WebSocket in browser environment
+		if (typeof window === 'undefined') return;
+
+		const websocket = new WebSocket(state.websocketUrl);
+
+		websocket.onclose = () => {
+			console.log('WebSocket closed');
+		};
+
+		websocket.onerror = (error) => {
+			console.error('WebSocket error:', error);
+		};
+
+		setWs(websocket);
+
+		// Cleanup on unmount
+		return () => {
+			websocket.close();
+		};
+	}, [state.websocketUrl]);
 
 	if (!state) {
 		return <div>Loading...</div>;
@@ -249,6 +427,9 @@ export default function Encounter() {
 					</div>
 				</div>
 			</main>
+
+			{/* Chat Component */}
+			<EncounterChat ws={ws} />
 		</div>
 	);
 }

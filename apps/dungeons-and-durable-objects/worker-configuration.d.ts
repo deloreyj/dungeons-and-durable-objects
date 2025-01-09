@@ -2,5 +2,6 @@
 
 interface Env {
 	API_BASE_URL: "http://localhost:8787";
+	WS_BASE_URL: "ws://localhost:8787";
 	AI: Ai;
 }

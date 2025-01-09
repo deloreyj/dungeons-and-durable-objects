@@ -456,6 +456,29 @@ app.get('/encounter/:encounterId', async (c) => {
 	return c.json(state);
 });
 
+app.get('/encounter/:encounterId/ws', async (c) => {
+	console.log('GET /encounter/:encounterId/ws - Starting request');
+	const upgradeHeader = c.req.header('Upgrade');
+	console.log('Upgrade header:', upgradeHeader);
+	if (!upgradeHeader || upgradeHeader !== 'websocket') {
+		console.warn('Upgrade header missing or not websocket');
+		return new Response('Durable Object expected Upgrade: websocket', { status: 426 });
+	}
+	console.log('Upgrade header is websocket');
+
+	const encounterId = c.req.param('encounterId');
+	if (!encounterId) {
+		console.warn('Encounter ID missing in request');
+		return c.text('Encounter ID is required', 400);
+	}
+	console.log('Encounter ID:', encounterId);
+
+	const id = c.env.ENCOUNTERS.idFromName(encounterId);
+	const stub = c.env.ENCOUNTERS.get(id);
+	console.log('Retrieved encounter stub');
+	return stub.fetch(c.req.raw);
+});
+
 export default app;
 
 export { Character, Encounter, GenerateCharacterImageWorkflow };

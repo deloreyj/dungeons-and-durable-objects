@@ -507,14 +507,62 @@ export class Character extends DurableObject<Env> {
 	// AI INTEGRATION
 
 	/**
+	 * Constructs a prompt for AI responses that includes character context and system instructions
+	 * @param state Current character state
+	 * @param context Message or situation the character is responding to
+	 * @param isEnemy Whether the message is from an enemy
+	 * @returns Formatted prompt string
+	 */
+	private async constructCharacterPrompt(state: CharacterState, context: string, isEnemy: boolean = false): Promise<string> {
+		const systemPrompt = `You are a Dungeons & Dragons character responding to a message in an encounter chat.
+Your responses should be short, concise, and in-character - no more than 1-2 sentences. Make your phrasing and tone match your character's race and class.
+Still try to be clever and fun. The ultimate goal is the enjoyment of the players.
+You may be terse, rude, or friendly depending on your character's personality.${
+			isEnemy ? '\nThe message is from an enemy, so you should be hostile or antagonistic in your response.' : ''
+		}
+Never break character or acknowledge you are an AI.
+Never use markdown or formatting.
+Respond directly as your character would in this situation.`;
+
+		const characterContext = `Character Context:
+Name: ${state.name}
+Race: ${state.race}
+Class: ${state.characterClass || 'Unknown'}
+Alignment: ${state.alignment}
+Current HP: ${state.currentHp}/${state.maxHp}
+Conditions: ${Array.from(state.conditions).join(', ') || 'None'}
+Backstory: ${state.backstory}
+Personality: ${state.playStylePreference || 'balanced'}`;
+
+		return `${systemPrompt}
+
+${characterContext}
+
+Player Message: ${context}
+
+Response:`;
+	}
+
+	/**
 	 * Generates AI response based on character personality
-	 * @param context Situation context
+	 * @param context Message or situation context
+	 * @param isEnemy Whether the message is from an enemy
 	 * @returns Generated response
 	 */
-	async generateResponse(context: string): Promise<string> {
-		const systemPrompt = (await this.ctx.storage.get('systemPrompt')) as string;
-		const prompt = `${systemPrompt}\n\nContext: ${context}\n\nResponse:`;
-		return 'Generated response based on character personality';
+	async generateResponse(context: string, isEnemy: boolean = false): Promise<string> {
+		const state = await this.getCharacterState();
+		const prompt = await this.constructCharacterPrompt(state, context, isEnemy);
+		const AIResponse = (await this.env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
+			prompt,
+		})) as {
+			response?: string;
+			tool_calls?: {
+				name: string;
+				arguments: unknown;
+			}[];
+		};
+		if (!AIResponse.response) throw new Error('No response from AI');
+		return AIResponse.response;
 	}
 
 	async setImage(imageKey: string) {

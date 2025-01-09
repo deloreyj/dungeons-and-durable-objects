@@ -47,6 +47,14 @@ interface EncounterState {
 	mapSize: { width: number; height: number };
 	map: MapCell[][];
 	characterPositions: Map<string, Position>;
+	chatMessages: ChatMessage[];
+}
+
+interface ChatMessage {
+	id: string;
+	characterName: string;
+	content: string;
+	timestamp: number;
 }
 
 export class Encounter extends DurableObject<Env> {
@@ -57,6 +65,129 @@ export class Encounter extends DurableObject<Env> {
 		super(ctx, env);
 		this.storage = ctx.storage;
 		this.env = env;
+	}
+
+	async fetch(request: Request) {
+		console.log('Fetching encounter');
+		const webSocketPair = new WebSocketPair();
+		const [client, server] = Object.values(webSocketPair);
+		console.log('Accepting WebSocket');
+		this.ctx.acceptWebSocket(server);
+		console.log('WebSocket accepted');
+
+		return new Response(null, {
+			status: 101,
+			webSocket: client,
+		});
+	}
+
+	async webSocketMessage(ws: WebSocket, message: ArrayBuffer | string) {
+		if (typeof message !== 'string') return;
+
+		try {
+			const data = JSON.parse(message);
+
+			if (data.type === 'initialize_chat') {
+				// Send chat history to the new client
+				const chatMessages = ((await this.storage.get('chatMessages')) as ChatMessage[]) || [];
+				ws.send(
+					JSON.stringify({
+						type: 'chat_history',
+						messages: chatMessages,
+					})
+				);
+				return;
+			}
+
+			if (data.type === 'chat') {
+				const chatMessage: ChatMessage = {
+					id: crypto.randomUUID(),
+					characterName: data.userName,
+					content: data.content,
+					timestamp: Date.now(),
+				};
+
+				// Store and broadcast the original message first
+				const chatMessages = ((await this.storage.get('chatMessages')) as ChatMessage[]) || [];
+				chatMessages.push(chatMessage);
+				await this.storage.put('chatMessages', chatMessages);
+				await this.broadcast({
+					type: 'chat',
+					message: chatMessage,
+				});
+
+				// Check for @ mentions
+				const mentionRegex = /@([^@\n]+?)(?=\s|$)/g;
+				const mentions = data.content.match(mentionRegex);
+
+				if (mentions) {
+					console.log('mentions', mentions);
+					console.log('Checking for mentions in message:', data.content);
+					const characters = ((await this.storage.get('characters')) as Record<string, EncounterCharacter>) || {};
+
+					for (const mention of mentions) {
+						console.log('Processing mention:', mention);
+						const characterName = mention.slice(1).trim(); // Remove @ symbol and trim whitespace
+						const character = Object.values(characters).find((c) => c.name.toLowerCase().includes(characterName.toLowerCase()));
+						console.log('Found character:', character);
+						if (character) {
+							console.log('Character found, generating response');
+							// Get character DO and generate response
+							const characterDO = this.env.CHARACTERS.get(this.env.CHARACTERS.idFromName(character.id));
+							const isEnemy = character.team === 'Enemies';
+							const response = await characterDO.generateResponse(data.content, isEnemy);
+							console.log('Response generated:', response);
+							const responseMessage: ChatMessage = {
+								id: crypto.randomUUID(),
+								characterName: character.name,
+								content: response,
+								timestamp: Date.now(),
+							};
+
+							// Store and broadcast the response
+							const updatedChatMessages = ((await this.storage.get('chatMessages')) as ChatMessage[]) || [];
+							updatedChatMessages.push(responseMessage);
+							// Keep only last 100 messages
+							if (updatedChatMessages.length > 100) {
+								updatedChatMessages.shift();
+							}
+							await this.storage.put('chatMessages', updatedChatMessages);
+							await this.broadcast({
+								type: 'chat',
+								message: responseMessage,
+							});
+						} else {
+							// Character not found, send DM message
+							const dmMessage: ChatMessage = {
+								id: crypto.randomUUID(),
+								characterName: 'Encounter DM',
+								content: `Character ${characterName} not found`,
+								timestamp: Date.now(),
+							};
+
+							const updatedChatMessages = ((await this.storage.get('chatMessages')) as ChatMessage[]) || [];
+							updatedChatMessages.push(dmMessage);
+							// Keep only last 100 messages
+							if (updatedChatMessages.length > 100) {
+								updatedChatMessages.shift();
+							}
+							await this.storage.put('chatMessages', updatedChatMessages);
+							await this.broadcast({
+								type: 'chat',
+								message: dmMessage,
+							});
+						}
+					}
+				}
+			}
+		} catch (error) {
+			console.error('Error processing WebSocket message:', error);
+		}
+	}
+
+	async webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean) {
+		// If the client closes the connection, the runtime will invoke the webSocketClose() handler.
+		ws.close(code, 'Durable Object is closing WebSocket');
 	}
 
 	async getEncounterState(): Promise<EncounterState> {
@@ -110,6 +241,7 @@ export class Encounter extends DurableObject<Env> {
 			map: emptyMap,
 			characterPositions: {},
 			status: 'PREPARING',
+			chatMessages: [],
 		});
 	}
 
@@ -333,6 +465,14 @@ ${nearbyCharacters}`;
 	}
 
 	private async broadcast(message: any) {
-		// ... existing broadcast code ...
+		const sockets = this.ctx.getWebSockets();
+		const messageStr = JSON.stringify(message);
+		sockets.forEach((socket) => {
+			try {
+				socket.send(messageStr);
+			} catch (err) {
+				console.error('Error broadcasting message:', err);
+			}
+		});
 	}
 }
