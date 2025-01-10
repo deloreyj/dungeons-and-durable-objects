@@ -479,6 +479,38 @@ app.get('/encounter/:encounterId/ws', async (c) => {
 	return stub.fetch(c.req.raw);
 });
 
+app.post('/encounter/:encounterId/start', async (c) => {
+	console.log('POST /encounter/:encounterId/start - Starting request');
+	const encounterId = c.req.param('encounterId');
+	if (!encounterId) {
+		console.warn('Encounter ID missing in request');
+		return c.text('Encounter ID is required', 400);
+	}
+	console.log(`Starting encounter with ID: ${encounterId}`);
+
+	const id = c.env.ENCOUNTERS.idFromName(encounterId);
+	const stub = c.env.ENCOUNTERS.get(id);
+	await stub.startEncounter();
+
+	return c.json({ success: true });
+});
+
+app.post('/encounter/:encounterId/end', async (c) => {
+	console.log('POST /encounter/:encounterId/end - Starting request');
+	const encounterId = c.req.param('encounterId');
+	if (!encounterId) {
+		console.warn('Encounter ID missing in request');
+		return c.text('Encounter ID is required', 400);
+	}
+	console.log(`Ending encounter with ID: ${encounterId}`);
+
+	const id = c.env.ENCOUNTERS.idFromName(encounterId);
+	const stub = c.env.ENCOUNTERS.get(id);
+	await stub.endEncounter();
+
+	return c.json({ success: true });
+});
+
 export default app;
 
 export { Character, Encounter, GenerateCharacterImageWorkflow };

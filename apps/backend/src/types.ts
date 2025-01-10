@@ -169,3 +169,23 @@ export interface SpecialAction {
 }
 
 export type Action = WeaponAttack | SpecialAction;
+
+export type SimpleFunctionParameter = {
+	type: string;
+	description?: string;
+};
+
+export type SimpleFunction = {
+	name: string;
+	description: string;
+	parameters: {
+		type: 'object';
+		properties: Record<string, SimpleFunctionParameter>;
+		required: string[];
+	};
+};
+
+export interface AiTextGenerationToolInput {
+	type: 'function';
+	function: SimpleFunction;
+}

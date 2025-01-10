@@ -1,4 +1,4 @@
-import { useLoaderData, Link } from '@remix-run/react';
+import { useLoaderData, Link, useParams } from '@remix-run/react';
 import { json } from '@remix-run/node';
 import type { LoaderFunctionArgs } from '@remix-run/node';
 import { Card, CardHeader, CardContent } from '~/components/ui/card';
@@ -39,13 +39,20 @@ interface EncounterState {
 	characterPositions: Record<string, Position>;
 	characters: (EncounterCharacter & { imageUrl?: string })[];
 	currentTurn?: string;
-	round: number;
+	roundNumber: number;
 	status: 'PREPARING' | 'IN_PROGRESS' | 'COMPLETED';
 }
 
 interface ChatMessage {
 	id: string;
 	characterName: string;
+	content: string;
+	timestamp: number;
+}
+
+interface EncounterLogMessage {
+	id: string;
+	type: 'DM' | 'USER' | 'EVENT';
 	content: string;
 	timestamp: number;
 }
@@ -70,7 +77,7 @@ export async function loader({ params, context }: LoaderFunctionArgs) {
 
 	const websocketUrl = `${context.cloudflare.env.WS_BASE_URL}/encounter/${params.id}/ws`;
 
-	const finalData = { ...data, characters: charactersWithImages, websocketUrl };
+	const finalData = { ...data, characters: charactersWithImages, websocketUrl, baseUrl: context.cloudflare.env.API_BASE_URL };
 
 	return json(finalData);
 }
@@ -197,7 +204,7 @@ function CharacterList({ characters, team }: { characters: EncounterCharacter[];
 function EncounterChat({ ws }: { ws: WebSocket | null }) {
 	const [messages, setMessages] = useState<ChatMessage[]>([]);
 	const [message, setMessage] = useState('');
-	const [isOpen, setIsOpen] = useState(false);
+	const [isOpen, setIsOpen] = useState(true);
 	const [userName, setUserName] = useState('');
 	const [isNameSet, setIsNameSet] = useState(false);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -337,15 +344,145 @@ function EncounterChat({ ws }: { ws: WebSocket | null }) {
 	);
 }
 
+function EncounterLog({ ws }: { ws: WebSocket | null }) {
+	const [messages, setMessages] = useState<EncounterLogMessage[]>([]);
+	const [message, setMessage] = useState('');
+	const [isOpen, setIsOpen] = useState(true);
+	const textareaRef = useRef<HTMLTextAreaElement>(null);
+	const scrollAreaRef = useRef<HTMLDivElement>(null);
+
+	useEffect(() => {
+		if (!ws) return;
+
+		const handleMessage = (event: MessageEvent) => {
+			const data = JSON.parse(event.data);
+			if (data.type === 'encounter_log') {
+				setMessages((prev) => [...prev, data.message]);
+				// Scroll to bottom after new message
+				setTimeout(() => {
+					if (scrollAreaRef.current) {
+						scrollAreaRef.current.scrollTop = scrollAreaRef.current.scrollHeight;
+					}
+				}, 0);
+			} else if (data.type === 'encounter_log_history') {
+				setMessages(data.messages);
+				// Scroll to bottom after loading history
+				setTimeout(() => {
+					if (scrollAreaRef.current) {
+						scrollAreaRef.current.scrollTop = scrollAreaRef.current.scrollHeight;
+					}
+				}, 0);
+			}
+		};
+
+		ws.addEventListener('message', handleMessage);
+		ws.send(JSON.stringify({ type: 'initialize_encounter_log' }));
+
+		return () => ws.removeEventListener('message', handleMessage);
+	}, [ws]);
+
+	const sendMessage = (e?: React.FormEvent) => {
+		e?.preventDefault();
+		if (!ws || !message.trim()) return;
+
+		ws.send(
+			JSON.stringify({
+				type: 'encounter_log',
+				messageType: 'USER',
+				content: message,
+			})
+		);
+		setMessage('');
+	};
+
+	const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+		if (e.key === 'Enter' && !e.shiftKey) {
+			e.preventDefault();
+			sendMessage();
+		}
+	};
+
+	const getMessageStyle = (type: EncounterLogMessage['type']) => {
+		switch (type) {
+			case 'DM':
+				return 'text-purple-600 font-semibold';
+			case 'USER':
+				return 'text-blue-600';
+			case 'EVENT':
+				return 'text-gray-600 italic';
+		}
+	};
+
+	return (
+		<div className="fixed bottom-4 left-4 z-50">
+			<Button onClick={() => setIsOpen(!isOpen)} variant="outline" className="mb-2 w-full">
+				{isOpen ? 'Hide' : 'Show'} Encounter Log
+			</Button>
+			{isOpen && (
+				<Card className="flex flex-col w-[350px] h-[400px]">
+					<CardHeader className="py-2 px-4 border-b shrink-0">
+						<h2 className="text-sm font-semibold">Encounter Log</h2>
+					</CardHeader>
+					<CardContent className="p-0 flex flex-col h-[calc(400px-3rem)]">
+						<div ref={scrollAreaRef} className="flex-1 overflow-y-auto p-4">
+							<div className="space-y-4">
+								{messages.map((msg) => (
+									<div key={msg.id} className="space-y-1">
+										<div className={`text-sm whitespace-pre-wrap ${getMessageStyle(msg.type)}`}>{msg.content}</div>
+									</div>
+								))}
+							</div>
+						</div>
+						<div className="p-4 border-t mt-auto">
+							<form onSubmit={sendMessage} className="flex gap-2">
+								<Textarea
+									ref={textareaRef}
+									value={message}
+									onChange={(e) => setMessage(e.target.value)}
+									onKeyDown={handleKeyDown}
+									placeholder="Send message to Encounter DM..."
+									className="resize-none min-h-[2.5rem] h-[2.5rem]"
+									rows={1}
+								/>
+								<Button type="submit" size="sm">
+									Send
+								</Button>
+							</form>
+						</div>
+					</CardContent>
+				</Card>
+			)}
+		</div>
+	);
+}
+
 export default function Encounter() {
+	const params = useParams();
 	const state = useLoaderData<typeof loader>();
 	const [ws, setWs] = useState<WebSocket | null>(null);
+	const [encounterState, setEncounterState] = useState(state);
 
 	useEffect(() => {
 		// Only create WebSocket in browser environment
 		if (typeof window === 'undefined') return;
 
 		const websocket = new WebSocket(state.websocketUrl);
+
+		websocket.onmessage = (event) => {
+			const data = JSON.parse(event.data);
+			if (data.type === 'encounter_state' && data.state) {
+				setEncounterState((prev) => ({
+					...prev,
+					...data.state,
+					characters: Array.isArray(data.state.characters)
+						? data.state.characters.map((char: EncounterCharacter) => ({
+								...char,
+								imageUrl: `${state.baseUrl}/characters/${encodeURIComponent(char.id)}/image`,
+						  }))
+						: prev.characters,
+				}));
+			}
+		};
 
 		websocket.onclose = () => {
 			console.log('WebSocket closed');
@@ -361,9 +498,9 @@ export default function Encounter() {
 		return () => {
 			websocket.close();
 		};
-	}, [state.websocketUrl]);
+	}, [state.websocketUrl, state.baseUrl]);
 
-	if (!state) {
+	if (!encounterState) {
 		return <div>Loading...</div>;
 	}
 
@@ -379,13 +516,32 @@ export default function Encounter() {
 									← Back
 								</Button>
 							</Link>
-							<h1 className="text-lg font-semibold text-gray-900">{state.name}</h1>
+							<h1 className="text-lg font-semibold text-gray-900">{encounterState.name}</h1>
 						</div>
 						<div className="flex items-center gap-4">
 							<p className="text-sm text-gray-500">
-								{state.status} {state.status === 'IN_PROGRESS' && `• Round ${state.round}`}
+								{encounterState.status} {encounterState.status === 'IN_PROGRESS' && `• Round ${encounterState.roundNumber}`}
 							</p>
-							{state.status === 'PREPARING' && <Button size="sm">Start Encounter</Button>}
+							{encounterState.status === 'PREPARING' && (
+								<Button
+									size="sm"
+									onClick={async () => {
+										await fetch(`${state.baseUrl}/encounter/${params.id}/start`, { method: 'POST' });
+									}}
+								>
+									Start Encounter
+								</Button>
+							)}
+							{encounterState.status === 'IN_PROGRESS' && (
+								<Button
+									size="sm"
+									onClick={async () => {
+										await fetch(`${state.baseUrl}/encounter/${params.id}/end`, { method: 'POST' });
+									}}
+								>
+									End Encounter
+								</Button>
+							)}
 						</div>
 					</div>
 				</div>
@@ -401,7 +557,7 @@ export default function Encounter() {
 								<h2 className="text-sm font-semibold text-blue-600">Party Members</h2>
 							</CardHeader>
 							<CardContent className="p-0">
-								<CharacterList characters={state.characters} team="Party" />
+								<CharacterList characters={encounterState.characters} team="Party" />
 							</CardContent>
 						</Card>
 
@@ -411,7 +567,7 @@ export default function Encounter() {
 								<h2 className="text-sm font-semibold">Battlefield</h2>
 							</CardHeader>
 							<CardContent className="p-2 h-full">
-								<BattleMap state={state} />
+								<BattleMap state={encounterState} />
 							</CardContent>
 						</Card>
 
@@ -421,14 +577,15 @@ export default function Encounter() {
 								<h2 className="text-sm font-semibold text-red-600">Enemies</h2>
 							</CardHeader>
 							<CardContent className="p-0">
-								<CharacterList characters={state.characters} team="Enemies" />
+								<CharacterList characters={encounterState.characters} team="Enemies" />
 							</CardContent>
 						</Card>
 					</div>
 				</div>
 			</main>
 
-			{/* Chat Component */}
+			{/* Chat Components */}
+			<EncounterLog ws={ws} />
 			<EncounterChat ws={ws} />
 		</div>
 	);

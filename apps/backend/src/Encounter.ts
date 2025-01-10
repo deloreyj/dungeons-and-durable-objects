@@ -1,5 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
-import { CharacterClass, Race, Alignment } from './types';
+import { CharacterClass, Race, Alignment, AiTextGenerationToolInput } from './types';
+import { encounterDMPersona, encounterLifecycle } from './promptHelpers';
 
 interface Position {
 	x: number;
@@ -36,18 +37,58 @@ interface EncounterCharacter {
 	characterClass: CharacterClass;
 }
 
+interface EncounterLogMessage {
+	id: string;
+	type: 'DM' | 'USER' | 'EVENT';
+	content: string;
+	timestamp: number;
+	proposedFunction?: {
+		name: string;
+		arguments: Record<string, any>;
+	};
+	actionData?: {
+		type: string;
+		x?: number;
+		y?: number;
+		remainingMovement?: number;
+		additionalMovement?: number;
+		stealthRoll?: number;
+		criticalSuccess?: boolean;
+		criticalFailure?: boolean;
+		actionName?: string;
+		target?: string;
+		result?: {
+			type: 'attack' | 'special';
+			attackRoll?: number;
+			isCrit?: boolean;
+			isCritFail?: boolean;
+			damage?: {
+				total: number;
+				type: string;
+			};
+			savingThrow?: {
+				dc: number;
+				ability: string;
+			};
+			description?: string;
+		};
+	};
+}
+
 interface EncounterState {
 	roundNumber: number;
 	currentTurnIndex: number;
 	initiativeOrder: string[];
-	characters: Map<string, EncounterCharacter>;
+	characters: Record<string, EncounterCharacter>;
 	encounterLog: string[];
 	name: string;
 	encounterDescription: string;
 	mapSize: { width: number; height: number };
 	map: MapCell[][];
-	characterPositions: Map<string, Position>;
+	characterPositions: Record<string, Position>;
 	chatMessages: ChatMessage[];
+	encounterAgentLog: EncounterLogMessage[];
+	status: 'PREPARING' | 'IN_PROGRESS' | 'COMPLETED';
 }
 
 interface ChatMessage {
@@ -56,6 +97,21 @@ interface ChatMessage {
 	content: string;
 	timestamp: number;
 }
+
+type SimpleFunctionParameter = {
+	type: string;
+	description?: string;
+};
+
+type SimpleFunction = {
+	name: string;
+	description: string;
+	parameters: {
+		type: 'object';
+		properties: Record<string, SimpleFunctionParameter>;
+		required: string[];
+	};
+};
 
 export class Encounter extends DurableObject<Env> {
 	storage: DurableObjectStorage;
@@ -67,6 +123,7 @@ export class Encounter extends DurableObject<Env> {
 		this.env = env;
 	}
 
+	/* WEBSOCKET STUFF */
 	async fetch(request: Request) {
 		console.log('Fetching encounter');
 		const webSocketPair = new WebSocketPair();
@@ -99,6 +156,18 @@ export class Encounter extends DurableObject<Env> {
 				return;
 			}
 
+			if (data.type === 'initialize_encounter_log') {
+				// Send encounter log history to the new client
+				const encounterLog = ((await this.storage.get('encounterAgentLog')) as EncounterLogMessage[]) || [];
+				ws.send(
+					JSON.stringify({
+						type: 'encounter_log_history',
+						messages: encounterLog,
+					})
+				);
+				return;
+			}
+
 			if (data.type === 'chat') {
 				const chatMessage: ChatMessage = {
 					id: crypto.randomUUID(),
@@ -117,7 +186,7 @@ export class Encounter extends DurableObject<Env> {
 				});
 
 				// Check for @ mentions
-				const mentionRegex = /@([^@\n]+?)(?=\s|$)/g;
+				const mentionRegex = /@([^@\s]+?)(?=[.,!?\s]|$)/g;
 				const mentions = data.content.match(mentionRegex);
 
 				if (mentions) {
@@ -180,6 +249,38 @@ export class Encounter extends DurableObject<Env> {
 					}
 				}
 			}
+
+			if (data.type === 'encounter_log') {
+				const logMessage: EncounterLogMessage = {
+					id: crypto.randomUUID(),
+					type: data.messageType,
+					content: data.content,
+					timestamp: Date.now(),
+				};
+
+				const encounterLog = ((await this.storage.get('encounterAgentLog')) as EncounterLogMessage[]) || [];
+				encounterLog.push(logMessage);
+				await this.storage.put('encounterAgentLog', encounterLog);
+				await this.broadcast({
+					type: 'encounter_log',
+					message: logMessage,
+				});
+
+				// Check if this is a response to a proposed action
+				if (data.messageType === 'USER') {
+					if (data.content.toLowerCase().trim() === 'yes') {
+						// Find the most recent DM message with a proposed function
+						const lastProposal = [...encounterLog].reverse().find((msg) => msg.type === 'DM' && msg.proposedFunction);
+
+						if (lastProposal?.proposedFunction) {
+							await this.execute(lastProposal.id);
+						}
+					} else {
+						// If it's any other message, plan again
+						await this.plan();
+					}
+				}
+			}
 		} catch (error) {
 			console.error('Error processing WebSocket message:', error);
 		}
@@ -190,9 +291,31 @@ export class Encounter extends DurableObject<Env> {
 		ws.close(code, 'Durable Object is closing WebSocket');
 	}
 
+	private async broadcast(message: any) {
+		const sockets = this.ctx.getWebSockets();
+		const messageStr = JSON.stringify(message);
+		sockets.forEach((socket) => {
+			try {
+				socket.send(messageStr);
+			} catch (err) {
+				console.error('Error broadcasting message:', err);
+			}
+		});
+	}
+	/* END WEBSOCKET STUFF */
+
+	/* HANDLERS AND DATA PROVIDERS */
 	async getEncounterState(): Promise<EncounterState> {
 		const state = (await this.storage.list()) as unknown as Map<string, unknown>;
 		return Object.fromEntries(state) as unknown as EncounterState;
+	}
+
+	async broadcastState() {
+		const state = await this.getEncounterState();
+		await this.broadcast({
+			type: 'encounter_state',
+			state,
+		});
 	}
 
 	async initializeEncounter(id: string, name: string, encounterDescription: string) {
@@ -242,7 +365,50 @@ export class Encounter extends DurableObject<Env> {
 			characterPositions: {},
 			status: 'PREPARING',
 			chatMessages: [],
+			encounterAgentLog: [
+				{
+					id: crypto.randomUUID(),
+					type: 'DM',
+					content: `Welcome to ${name}! I am your Encounter DM. I'll help manage this encounter and keep track of everything that happens. Feel free to ask me questions or give me instructions at any time.`,
+					timestamp: Date.now(),
+				},
+			],
 		});
+		await this.broadcastState();
+	}
+
+	async startEncounter() {
+		const state = await this.getEncounterState();
+		if (state.status !== 'PREPARING') {
+			throw new Error('Encounter must be in PREPARING state to start');
+		}
+
+		await this.storage.put({
+			status: 'IN_PROGRESS',
+		});
+		await this.broadcastState();
+
+		await this.plan();
+
+		return { success: true };
+	}
+
+	async endEncounter() {
+		const state = await this.getEncounterState();
+		if (state.status !== 'IN_PROGRESS') {
+			throw new Error('Encounter must be in IN_PROGRESS state to end');
+		}
+
+		await this.storage.put({
+			status: 'COMPLETED',
+		});
+
+		await this.broadcast({
+			type: 'encounter_ended',
+		});
+		await this.broadcastState();
+
+		return { success: true };
 	}
 
 	async registerCharacter(characterId: string, team: 'Party' | 'Enemies') {
@@ -263,8 +429,6 @@ export class Encounter extends DurableObject<Env> {
 		characters[characterId] = character;
 		await this.storage.put('characters', characters);
 
-		await this.placeCharacter(characterId);
-
 		await this.broadcast({
 			type: 'character_joined',
 			character: {
@@ -275,26 +439,16 @@ export class Encounter extends DurableObject<Env> {
 				class: character.characterClass,
 			},
 		});
+		await this.broadcastState();
 
 		return { success: true };
-	}
-
-	async placeCharacter(characterId: string) {
-		const characters = (await this.storage.get('characters')) as Record<string, EncounterCharacter>;
-		const character = characters[characterId];
-		if (!character) {
-			throw new Error('Character not found');
-		}
-
-		const position = await this.getRandomEmptyPosition(character.team);
-		await this.moveCharacter(characterId, position);
 	}
 
 	async moveCharacter(characterId: string, newPos: Position): Promise<boolean> {
 		if (!(await this.isValidPosition(newPos))) return false;
 
 		const map = (await this.storage.get('map')) as EncounterState['map'];
-		const characterPositions = (await this.storage.get('characterPositions')) as Record<string, Position>;
+		const characterPositions = ((await this.storage.get('characterPositions')) || {}) as Record<string, Position>;
 
 		const currentPos = characterPositions[characterId];
 		if (currentPos) {
@@ -306,6 +460,7 @@ export class Encounter extends DurableObject<Env> {
 
 		await this.storage.put('map', map);
 		await this.storage.put('characterPositions', characterPositions);
+		await this.broadcastState();
 
 		return true;
 	}
@@ -315,49 +470,6 @@ export class Encounter extends DurableObject<Env> {
 		const map = (await this.storage.get('map')) as EncounterState['map'];
 
 		return pos.x >= 0 && pos.x < mapSize.width && pos.y >= 0 && pos.y < mapSize.height && map[pos.y][pos.x].terrain !== TerrainType.WALL;
-	}
-
-	private async getRandomEmptyPosition(team: 'Party' | 'Enemies'): Promise<Position> {
-		const mapSize = (await this.storage.get('mapSize')) as EncounterState['mapSize'];
-		const map = (await this.storage.get('map')) as EncounterState['map'];
-		const characterPositions = (await this.storage.get('characterPositions')) as Record<string, Position>;
-
-		// Determine which half of the map to use based on team
-		const startX = team === 'Party' ? 0 : Math.floor(mapSize.width / 2);
-		const endX = team === 'Party' ? Math.floor(mapSize.width / 2) : mapSize.width;
-
-		let attempts = 0;
-		const maxAttempts = 100;
-
-		while (attempts < maxAttempts) {
-			const x = startX + Math.floor(Math.random() * (endX - startX));
-			const y = Math.floor(Math.random() * mapSize.height);
-
-			// Check if position is empty and valid
-			if (
-				map[y][x].terrain !== TerrainType.WALL &&
-				!map[y][x].characterId &&
-				!Object.values(characterPositions).some((pos) => pos.x === x && pos.y === y)
-			) {
-				return { x, y };
-			}
-			attempts++;
-		}
-
-		// If no position found after max attempts, use first available position
-		for (let x = startX; x < endX; x++) {
-			for (let y = 0; y < mapSize.height; y++) {
-				if (
-					map[y][x].terrain !== TerrainType.WALL &&
-					!map[y][x].characterId &&
-					!Object.values(characterPositions).some((pos) => pos.x === x && pos.y === y)
-				) {
-					return { x, y };
-				}
-			}
-		}
-
-		throw new Error('No valid position found for character placement');
 	}
 
 	async getAllCharacterDistances(characterId: string): Promise<Record<string, number>> {
@@ -402,18 +514,24 @@ export class Encounter extends DurableObject<Env> {
 		return `Current Map State:
 ${mapString}
 
-Legend:
+${this.getMapLegend()}
+
+Your Position: (${pos.x}, ${pos.y})
+Nearby Characters:
+${nearbyCharacters}
+
+`;
+	}
+
+	getMapLegend(): string {
+		return `Legend:
 P = Party Member
 E = Enemy
 # = Wall
 ~ = Water
 ! = Lava
 * = Difficult Terrain
-. = Normal Ground
-
-Your Position: (${pos.x}, ${pos.y})
-Nearby Characters:
-${nearbyCharacters}`;
+. = Normal Ground`;
 	}
 
 	async generateMapString(): Promise<string> {
@@ -464,15 +582,763 @@ ${nearbyCharacters}`;
 		}));
 	}
 
-	private async broadcast(message: any) {
-		const sockets = this.ctx.getWebSockets();
-		const messageStr = JSON.stringify(message);
-		sockets.forEach((socket) => {
-			try {
-				socket.send(messageStr);
-			} catch (err) {
-				console.error('Error broadcasting message:', err);
+	async placeCharacters() {
+		const characters = (await this.storage.get('characters')) as Record<string, EncounterCharacter>;
+
+		// Get party and enemy characters
+		const partyMembers = Object.entries(characters).filter(([_, char]) => char.team === 'Party');
+		const enemies = Object.entries(characters).filter(([_, char]) => char.team === 'Enemies');
+
+		// Place party members in the open path at the top
+		const pathPositions = [
+			{ x: 4, y: 0 },
+			{ x: 5, y: 0 },
+			{ x: 6, y: 0 },
+			{ x: 4, y: 1 },
+			{ x: 5, y: 1 },
+			{ x: 6, y: 1 },
+			{ x: 4, y: 2 },
+			{ x: 5, y: 2 },
+			{ x: 6, y: 2 },
+		];
+
+		for (let i = 0; i < partyMembers.length; i++) {
+			if (i < pathPositions.length) {
+				const [id] = partyMembers[i];
+				const pos = pathPositions[i];
+				console.log('Moving character', id, 'to', pos);
+				await this.moveCharacter(id, pos);
 			}
+		}
+
+		// Place two goblins near dead horses
+		const horsePositions = [
+			{ x: 3, y: 7 }, // Below first dead horse
+			{ x: 4, y: 7 }, // Below second dead horse
+		];
+
+		for (let i = 0; i < 2; i++) {
+			if (i < enemies.length) {
+				const [id] = enemies[i];
+				const pos = horsePositions[i];
+				console.log('Moving character', id, 'to', pos);
+				await this.moveCharacter(id, pos);
+			}
+		}
+
+		// Place remaining goblins in trees on either side
+		const treePositions = [
+			{ x: 1, y: 6 }, // Left side of path
+			{ x: 7, y: 6 }, // Right side of path
+		];
+
+		for (let i = 2; i < enemies.length; i++) {
+			const treeIndex = i - 2;
+			if (treeIndex < treePositions.length) {
+				const [id] = enemies[i];
+				const pos = treePositions[treeIndex];
+				await this.moveCharacter(id, pos);
+			}
+		}
+
+		return true;
+	}
+
+	async advanceRound() {
+		const roundNumber = ((await this.storage.get('roundNumber')) as number) || 0;
+		const newRound = roundNumber + 1;
+		await this.storage.put('roundNumber', newRound);
+		await this.storage.put('currentTurnIndex', 0);
+
+		const logMessage: EncounterLogMessage = {
+			id: crypto.randomUUID(),
+			type: 'EVENT',
+			content: `Round ${newRound} begins!`,
+			timestamp: Date.now(),
+		};
+
+		const encounterLog = ((await this.storage.get('encounterAgentLog')) as EncounterLogMessage[]) || [];
+		encounterLog.push(logMessage);
+		await this.storage.put('encounterAgentLog', encounterLog);
+		await this.broadcast({
+			type: 'encounter_log',
+			message: logMessage,
 		});
+
+		await this.broadcastState();
+		return true;
+	}
+
+	async postEncounterNarrative() {
+		const state = await this.getEncounterState();
+		const characters = await this.getCharacters();
+
+		const prompt = `You are a skilled D&D Dungeon Master. Create an engaging narrative introduction for this encounter. Make it atmospheric and dramatic, but keep it concise (1 paragraph max).
+
+Encounter Description: ${state.encounterDescription}
+
+Characters Present:
+${characters.map((char) => `- ${char.name} (${char.race} ${char.class}) - ${char.team}`).join('\n')}
+
+Write the narrative introduction:`;
+
+		const response = (await this.env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
+			prompt,
+		})) as { response: string };
+
+		if (!response.response) {
+			throw new Error('Failed to generate narrative');
+		}
+
+		const chatMessage: ChatMessage = {
+			id: crypto.randomUUID(),
+			characterName: 'Encounter DM',
+			content: response.response.trim(),
+			timestamp: Date.now(),
+		};
+
+		const chatMessages = ((await this.storage.get('chatMessages')) as ChatMessage[]) || [];
+		chatMessages.push(chatMessage);
+		await this.storage.put('chatMessages', chatMessages);
+		await this.broadcast({
+			type: 'chat',
+			message: chatMessage,
+		});
+
+		return true;
+	}
+
+	async rollInitiative() {
+		const characters = ((await this.storage.get('characters')) as Record<string, EncounterCharacter>) || {};
+		const initiatives: Array<{ id: string; initiative: number }> = [];
+
+		// Roll initiative for each character
+		for (const [id, character] of Object.entries(characters)) {
+			const characterDO = this.env.CHARACTERS.get(this.env.CHARACTERS.idFromName(id));
+			const initiative = await characterDO.rollInitiative();
+			initiatives.push({ id, initiative });
+		}
+
+		// Sort by initiative, highest first
+		const initiativeOrder = initiatives.sort((a, b) => b.initiative - a.initiative).map((i) => i.id);
+
+		await this.storage.put('initiativeOrder', initiativeOrder);
+		await this.storage.put('currentTurnIndex', 0);
+		await this.broadcastState();
+
+		// Log the initiative order
+		const initiativeMessage = initiatives
+			.sort((a, b) => b.initiative - a.initiative)
+			.map((i) => `${characters[i.id].name}: ${i.initiative}`)
+			.join('\n');
+
+		const logMessage: EncounterLogMessage = {
+			id: crypto.randomUUID(),
+			type: 'EVENT',
+			content: `Initiative order:\n${initiativeMessage}`,
+			timestamp: Date.now(),
+		};
+
+		const encounterLog = ((await this.storage.get('encounterAgentLog')) as EncounterLogMessage[]) || [];
+		encounterLog.push(logMessage);
+		await this.storage.put('encounterAgentLog', encounterLog);
+		await this.broadcast({
+			type: 'encounter_log',
+			message: logMessage,
+		});
+
+		return true;
+	}
+
+	async getActiveCharacter() {
+		const currentTurnIndex = (await this.storage.get('currentTurnIndex')) as number;
+		const initiativeOrder = (await this.storage.get('initiativeOrder')) as string[];
+		const characters = (await this.storage.get('characters')) as Record<string, EncounterCharacter>;
+
+		if (currentTurnIndex < 0 || currentTurnIndex >= initiativeOrder.length) {
+			throw new Error('Invalid turn index');
+		}
+
+		const activeCharacterId = initiativeOrder[currentTurnIndex];
+		const activeCharacter = characters[activeCharacterId];
+
+		if (!activeCharacter) {
+			throw new Error('Character not found');
+		}
+
+		return { activeCharacterId, activeCharacter };
+	}
+	/**
+	 * Begin a character's turn by gathering context and triggering their AI
+	 */
+	async beginTurn() {
+		const { activeCharacterId } = await this.getActiveCharacter();
+
+		// Get the character's DO
+		const characterDO = this.env.CHARACTERS.get(this.env.CHARACTERS.idFromName(activeCharacterId));
+
+		// Start their turn (resets actions and movement)
+		await characterDO.startTurn();
+	}
+
+	async promptCharacterToAct() {
+		const { activeCharacterId, activeCharacter } = await this.getActiveCharacter();
+
+		// Get detailed context for the character
+		const context = await this.getContextForCharacter(activeCharacterId);
+
+		// Add recent events from the encounter log
+		const encounterLog = ((await this.storage.get('encounterAgentLog')) as EncounterLogMessage[]) || [];
+		const recentEvents = encounterLog
+			.slice(-5)
+			.map((log) => `[${new Date(log.timestamp).toISOString()}] ${log.type}: ${log.content}`)
+			.join('\n');
+
+		// Combine all context
+		const fullContext = `
+Current Turn: ${activeCharacter.name} (${activeCharacter.characterClass})
+Round: ${await this.storage.get('roundNumber')}
+
+Map State:
+${context}
+
+Recent Events:
+${recentEvents}
+`;
+
+		// Get the character's DO
+		const characterDO = this.env.CHARACTERS.get(this.env.CHARACTERS.idFromName(activeCharacterId));
+
+		// Trigger the character's AI to plan and execute their turn
+		const actionResult = await characterDO.act(fullContext);
+
+		if (actionResult) {
+			let actionDescription = '';
+			let actionData: EncounterLogMessage['actionData'] = undefined;
+
+			switch (actionResult.type) {
+				case 'move':
+					actionDescription = `${activeCharacter.name} moves to position (${actionResult.x}, ${actionResult.y}). ${actionResult.remainingMovement} feet of movement remaining.`;
+					actionData = {
+						type: 'move',
+						x: actionResult.x,
+						y: actionResult.y,
+						remainingMovement: actionResult.remainingMovement,
+					};
+					break;
+				case 'dash':
+					actionDescription = `${activeCharacter.name} uses Dash action, gaining ${actionResult.additionalMovement} feet of movement.`;
+					actionData = {
+						type: 'dash',
+						additionalMovement: actionResult.additionalMovement,
+						remainingMovement: actionResult.remainingMovement,
+					};
+					break;
+				case 'disengage':
+					actionDescription = `${activeCharacter.name} uses Disengage action to avoid opportunity attacks.`;
+					actionData = {
+						type: 'disengage',
+					};
+					break;
+				case 'hide':
+					actionDescription = `${activeCharacter.name} attempts to Hide with a Stealth roll of ${actionResult.stealthRoll}${
+						actionResult.criticalSuccess ? ' (Critical Success!)' : ''
+					}${actionResult.criticalFailure ? ' (Critical Failure!)' : ''}.`;
+					actionData = {
+						type: 'hide',
+						stealthRoll: actionResult.stealthRoll,
+						criticalSuccess: actionResult.criticalSuccess,
+						criticalFailure: actionResult.criticalFailure,
+					};
+					break;
+				case 'action':
+				case 'bonusAction': {
+					const result = actionResult.result;
+					if (!result) break;
+
+					if (result.type === 'attack') {
+						actionDescription = `${activeCharacter.name} ${
+							actionResult.type === 'bonusAction' ? 'uses bonus action to attack' : 'attacks'
+						} ${actionResult.target} with ${actionResult.actionName}. Attack roll: ${result.attackRoll}${
+							result.isCrit ? ' (Critical Hit!)' : ''
+						}${result.isCritFail ? ' (Critical Miss!)' : ''}.${
+							result.damage ? ` Damage: ${result.damage.total} ${result.damage.type}` : ''
+						}`;
+						actionData = {
+							type: actionResult.type,
+							actionName: actionResult.actionName,
+							target: actionResult.target,
+							result: {
+								type: 'attack',
+								attackRoll: result.attackRoll,
+								isCrit: result.isCrit,
+								isCritFail: result.isCritFail,
+								damage: result.damage,
+							},
+						};
+					} else if (result.type === 'special') {
+						actionDescription = `${activeCharacter.name} ${actionResult.type === 'bonusAction' ? 'uses bonus action:' : 'uses'} ${
+							actionResult.actionName
+						}${actionResult.target ? ` on ${actionResult.target}` : ''}.${
+							result.savingThrow ? ` DC ${result.savingThrow.dc} ${result.savingThrow.ability} save required.` : ''
+						}${result.damage ? ` Damage: ${result.damage.total} ${result.damage.type}` : ''}`;
+						actionData = {
+							type: actionResult.type,
+							actionName: actionResult.actionName,
+							target: actionResult.target,
+							result: {
+								type: 'special',
+								savingThrow: result.savingThrow,
+								damage: result.damage,
+								description: result.description,
+							},
+						};
+					}
+					break;
+				}
+				case 'endTurn':
+					actionDescription = `${activeCharacter.name} ends their turn.`;
+					actionData = {
+						type: 'endTurn',
+					};
+					break;
+			}
+
+			const actionLogMessage: EncounterLogMessage = {
+				id: crypto.randomUUID(),
+				type: 'EVENT',
+				content: actionDescription,
+				timestamp: Date.now(),
+				actionData,
+			};
+
+			encounterLog.push(actionLogMessage);
+			await this.storage.put('encounterAgentLog', encounterLog);
+			await this.broadcast({
+				type: 'encounter_log',
+				message: actionLogMessage,
+			});
+		}
+	}
+
+	async narrateAction(action: string) {
+		const prompt = `You are a skilled D&D Dungeon Master. Create a brief, vivid narrative description of this action. Keep it to 1-2 sentences and make it dramatic and engaging.
+
+Action: ${action}
+
+Write the narrative description:`;
+
+		const response = (await this.env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
+			prompt,
+		})) as { response: string };
+
+		if (!response.response) {
+			throw new Error('Failed to generate narrative');
+		}
+
+		const chatMessage: ChatMessage = {
+			id: crypto.randomUUID(),
+			characterName: 'Encounter DM',
+			content: response.response.trim(),
+			timestamp: Date.now(),
+		};
+
+		const chatMessages = ((await this.storage.get('chatMessages')) as ChatMessage[]) || [];
+		chatMessages.push(chatMessage);
+		await this.storage.put('chatMessages', chatMessages);
+		await this.broadcast({
+			type: 'chat',
+			message: chatMessage,
+		});
+	}
+	/* END HANDLERS AND DATA PROVIDERS */
+
+	/* AGENTIC LOOP */
+	getSystemPrompt() {
+		return `
+		### SYSTEM PROMPT ###
+		# Persona: ${encounterDMPersona}
+		# Encounter Lifecycle: ${encounterLifecycle}
+		### END SYSTEM PROMPT ###
+		`;
+	}
+
+	async getEncounterStatePrompt() {
+		const state = await this.getEncounterState();
+		const mapString = await this.generateMapString();
+		const mapLegend = this.getMapLegend();
+		const characters = await this.getCharacters();
+		const recentLogs = state.encounterAgentLog || [];
+		const activeCharacterId = state.initiativeOrder[state.currentTurnIndex];
+		const activeCharacter = characters.find((c) => c.id === activeCharacterId);
+
+		return `
+		### ENCOUNTER DESCRIPTION ###
+		${state.encounterDescription}
+		### END ENCOUNTER DESCRIPTION ###
+
+		### CHARACTER PLACEMENT INSTRUCTIONS ###
+		Party characters should initially be placed at the top of the map within the path indicated by cells with no terrain or cover.
+		Two of the enemy goblins should be next to the dead horses indicated by the two cells of difficult terrain in the middle of the path.
+		The other two enemy goblins should be placed somewhere in the trees.
+		### END CHARACTER PLACEMENT INSTRUCTIONS ###
+
+		### CURRENT ENCOUNTER STATE ###
+		# Current Encounter State
+		Round: ${state.roundNumber}
+		Current Turn: ${state.currentTurnIndex} (${activeCharacter ? activeCharacter.name : 'No active character'})
+		Initiative Order: ${state.initiativeOrder.join(', ')}
+
+		# Characters
+		${characters.map((char) => `- ${char.name} (${char.id}): ${char.team} ${char.class} ${char.race}`).join('\n')}
+
+		# Current Map State
+		${mapString}
+		${mapLegend}
+
+		# Recent Events
+		${recentLogs.map((log) => `[${new Date(log.timestamp).toISOString()}] ${log.type}: ${log.content}`).join('\n')}
+		### END CURRENT ENCOUNTER STATE ###
+		`;
+	}
+
+	async plan() {
+		const prompt = `
+		${this.getSystemPrompt()}
+		
+		${await this.getEncounterStatePrompt()}
+		
+		Plan the next action for the encounter
+		`;
+		console.log('Prompt:', prompt);
+		const AiResponse = (await this.env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
+			prompt,
+			tools: this.getAvailableFunctions(),
+		})) as {
+			response?: string;
+			tool_calls?: {
+				name: string;
+				arguments: Record<string, any>;
+			}[];
+		};
+
+		if (AiResponse.tool_calls?.length) {
+			for (const tool_call of AiResponse.tool_calls) {
+				const logMessage: EncounterLogMessage = {
+					id: crypto.randomUUID(),
+					type: 'DM',
+					content: `Proposed action: ${tool_call.name} with arguments: ${JSON.stringify(tool_call.arguments)}`,
+					timestamp: Date.now(),
+					proposedFunction: tool_call,
+				};
+
+				const encounterLog = ((await this.storage.get('encounterAgentLog')) as EncounterLogMessage[]) || [];
+				encounterLog.push(logMessage);
+				await this.storage.put('encounterAgentLog', encounterLog);
+				await this.broadcast({
+					type: 'encounter_log',
+					message: logMessage,
+				});
+			}
+		}
+	}
+
+	async execute(logMessageId: string) {
+		const encounterLog = ((await this.storage.get('encounterAgentLog')) as EncounterLogMessage[]) || [];
+		const logMessage = encounterLog.find((msg) => msg.id === logMessageId);
+
+		if (!logMessage?.proposedFunction) {
+			throw new Error('No proposed function found for this log message');
+		}
+
+		const { name, arguments: args } = logMessage.proposedFunction;
+
+		// Add acknowledgment message
+		const ackMessage: EncounterLogMessage = {
+			id: crypto.randomUUID(),
+			type: 'DM',
+			content: `Understood! I'll execute the ${name} action right away.`,
+			timestamp: Date.now(),
+		};
+		encounterLog.push(ackMessage);
+		await this.storage.put('encounterAgentLog', encounterLog);
+		await this.broadcast({
+			type: 'encounter_log',
+			message: ackMessage,
+		});
+
+		switch (name) {
+			case 'moveCharacter':
+				const { characterId, x, y } = args;
+				await this.moveCharacter(characterId, { x, y });
+				break;
+			case 'postEncounterNarrative':
+				await this.postEncounterNarrative();
+				break;
+			case 'rollInitiative':
+				await this.rollInitiative();
+				break;
+			case 'placeCharacters':
+				await this.placeCharacters();
+				break;
+			case 'advanceRound':
+				await this.advanceRound();
+				break;
+			case 'narrateAction':
+				await this.narrateAction(args.action);
+				break;
+			case 'promptCharacterToAct':
+				await this.promptCharacterToAct();
+				break;
+			case 'beginTurn':
+				await this.beginTurn();
+				break;
+			case 'resolveAction':
+				await this.resolveAction();
+				break;
+			case 'advanceTurn':
+				await this.advanceTurn();
+				break;
+			default:
+				throw new Error(`Unknown function: ${name}`);
+		}
+
+		// Log the execution
+		const executionMessage: EncounterLogMessage = {
+			id: crypto.randomUUID(),
+			type: 'EVENT',
+			content: `Executed action: ${name}`,
+			timestamp: Date.now(),
+		};
+
+		encounterLog.push(executionMessage);
+		await this.storage.put('encounterAgentLog', encounterLog);
+		await this.broadcast({
+			type: 'encounter_log',
+			message: executionMessage,
+		});
+
+		// Plan next action
+		await this.plan();
+	}
+	/* END AGENTIC LOOP */
+
+	/* FUNCTION CALLING STUFF */
+	getAvailableFunctions(): AiTextGenerationToolInput[] {
+		return [
+			{
+				type: 'function',
+				function: {
+					name: 'moveCharacter',
+					description: 'Moves a character to a new position on the map if the position is valid.',
+					parameters: {
+						type: 'object',
+						properties: {
+							characterId: { type: 'string', description: 'The ID of the character to move' },
+							x: { type: 'number', description: 'The x coordinate to move to' },
+							y: { type: 'number', description: 'The y coordinate to move to' },
+						},
+						required: ['characterId', 'x', 'y'],
+					},
+				},
+			},
+			{
+				type: 'function',
+				function: {
+					name: 'placeCharacters',
+					description:
+						'Places all characters in their initial positions. Party members are placed in the open path at the top, two enemies near the dead horses, and two in the trees.',
+					parameters: {
+						type: 'object',
+						properties: {},
+						required: [],
+					},
+				},
+			},
+			{
+				type: 'function',
+				function: {
+					name: 'advanceRound',
+					description: 'Advances to the next round, resets the turn index to 0, and broadcasts the new round state.',
+					parameters: {
+						type: 'object',
+						properties: {},
+						required: [],
+					},
+				},
+			},
+			{
+				type: 'function',
+				function: {
+					name: 'advanceTurn',
+					description: 'Advances to the next turn in the initiative order. If at the end of the order, advances the round.',
+					parameters: {
+						type: 'object',
+						properties: {},
+						required: [],
+					},
+				},
+			},
+			{
+				type: 'function',
+				function: {
+					name: 'postEncounterNarrative',
+					description: 'Creates and posts a narrative introduction for the encounter in the chat.',
+					parameters: {
+						type: 'object',
+						properties: {},
+						required: [],
+					},
+				},
+			},
+			{
+				type: 'function',
+				function: {
+					name: 'rollInitiative',
+					description: 'Rolls initiative for all characters in the encounter and sets the turn order.',
+					parameters: {
+						type: 'object',
+						properties: {},
+						required: [],
+					},
+				},
+			},
+			{
+				type: 'function',
+				function: {
+					name: 'beginTurn',
+					description:
+						"Begins a character's turn by resetting their actions and movement. This is the first thing that should happen when a new turn begins. ",
+					parameters: {
+						type: 'object',
+						properties: {},
+						required: [],
+					},
+				},
+			},
+			{
+				type: 'function',
+				function: {
+					name: 'promptCharacterToAct',
+					description:
+						'Prompts the current character to take their turn by providing context and triggering their AI. This will happen in a loop during a Characters turn until they tell us to end turn. After a calling advanceTurn, make sure you beginTurn for the Character before prompting them to act.',
+					parameters: {
+						type: 'object',
+						properties: {},
+						required: [],
+					},
+				},
+			},
+			{
+				type: 'function',
+				function: {
+					name: 'resolveAction',
+					description:
+						'ALWAYS RUN THIS IMMEDIATELY AFTER executing promptCharacterToAct. Resolves the effects of thelast action in the encounter log, applying its effects to the game state. This should always be called right after promptCharacterToAct so the effects of their action are applied to the Encounter.',
+					parameters: {
+						type: 'object',
+						properties: {},
+						required: [],
+					},
+				},
+			},
+			{
+				type: 'function',
+				function: {
+					name: 'narrateAction',
+					description:
+						'Creates a narrative description of a Characters action and sends it to the encounter chat. This should only be used after both promptCharacterToAct and resolveAction have been called.',
+					parameters: {
+						type: 'object',
+						properties: {
+							action: { type: 'string', description: 'The action to narrate' },
+						},
+						required: ['action'],
+					},
+				},
+			},
+		];
+	}
+
+	/* END FUNCTION CALLING STUFF */
+
+	async resolveAction() {
+		const encounterLog = ((await this.storage.get('encounterAgentLog')) as EncounterLogMessage[]) || [];
+		const lastTenMessages = encounterLog.slice(-10);
+		const lastAction = lastTenMessages.reverse().find((msg) => msg.actionData);
+
+		if (!lastAction?.actionData) {
+			throw new Error('No action to resolve');
+		}
+
+		const actionData = lastAction.actionData;
+		const { activeCharacterId } = await this.getActiveCharacter();
+
+		switch (actionData.type) {
+			case 'move':
+				if (typeof actionData.x !== 'number' || typeof actionData.y !== 'number') {
+					throw new Error('Invalid move action data');
+				}
+				await this.moveCharacter(activeCharacterId, { x: actionData.x, y: actionData.y });
+				break;
+
+			case 'action':
+			case 'bonusAction':
+				if (!actionData.result) break;
+
+				if (actionData.result.type === 'attack' && actionData.target) {
+					// Apply damage to target if the attack hit
+					if (actionData.result.damage && !actionData.result.isCritFail) {
+						const targetDO = this.env.CHARACTERS.get(this.env.CHARACTERS.idFromName(actionData.target));
+						await targetDO.takeDamage(actionData.result.damage.total);
+					}
+				}
+				break;
+
+			case 'dash':
+			case 'disengage':
+			case 'hide':
+			case 'endTurn':
+				// These actions have already been resolved in the Character DO
+				break;
+
+			default:
+				throw new Error(`Unknown action type: ${actionData.type}`);
+		}
+
+		return true;
+	}
+
+	async advanceTurn() {
+		const currentTurnIndex = (await this.storage.get('currentTurnIndex')) as number;
+		const initiativeOrder = (await this.storage.get('initiativeOrder')) as string[];
+
+		// If we're at the end of the initiative order, advance the round
+		if (currentTurnIndex >= initiativeOrder.length - 1) {
+			await this.advanceRound();
+			return;
+		}
+
+		// Otherwise, just increment the turn index
+		await this.storage.put('currentTurnIndex', currentTurnIndex + 1);
+		await this.broadcastState();
+
+		const { activeCharacter } = await this.getActiveCharacter();
+		const logMessage: EncounterLogMessage = {
+			id: crypto.randomUUID(),
+			type: 'EVENT',
+			content: `${activeCharacter.name}'s turn begins!`,
+			timestamp: Date.now(),
+		};
+
+		const encounterLog = ((await this.storage.get('encounterAgentLog')) as EncounterLogMessage[]) || [];
+		encounterLog.push(logMessage);
+		await this.storage.put('encounterAgentLog', encounterLog);
+		await this.broadcast({
+			type: 'encounter_log',
+			message: logMessage,
+		});
+
+		return true;
 	}
 }
