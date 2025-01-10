@@ -37,8 +37,8 @@ export class GenerateCharacterImageWorkflow extends WorkflowEntrypoint<Env, Para
 			const response = (await this.env.AI.run('@cf/black-forest-labs/flux-1-schnell', {
 				prompt: imagePrompt,
 				steps: 8,
-				height: 1024,
-				width: 1024,
+				height: 512,
+				width: 512,
 			})) as AiTextToImageOutput;
 			//@ts-ignore
 			return response.image;
