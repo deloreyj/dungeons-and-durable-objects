@@ -25,7 +25,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
 	const characterClass = formData.get('characterClass') as string;
 	const race = formData.get('race') as string;
 
-	const response = await fetch(`${context.cloudflare.env.API_BASE_URL}/character`, {
+	const characterRequest = new Request(`${context.cloudflare.env.API_BASE_URL}/character`, {
 		method: 'POST',
 		headers: {
 			'Content-Type': 'application/json',
@@ -39,6 +39,8 @@ export async function action({ request, context }: ActionFunctionArgs) {
 			race,
 		}),
 	});
+
+	const response = await context.cloudflare.env.API.fetch(characterRequest);
 
 	return response.json();
 }
