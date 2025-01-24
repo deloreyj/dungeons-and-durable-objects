@@ -20,12 +20,13 @@ export async function action({ request, context }: ActionFunctionArgs) {
 	const encounterId = formData.get('encounterId') as string;
 	const characterId = formData.get('characterId') as string;
 
-	const response = await fetch(`${context.cloudflare.env.API_BASE_URL}/encounter/${encounterId}/characters/${characterId}`, {
+	const rq = new Request(`${context.cloudflare.env.API_BASE_URL}/encounter/${encounterId}/characters/${characterId}`, {
 		method: 'POST',
 		headers: {
 			'Content-Type': 'application/json',
 		},
 	});
+	const response = await context.cloudflare.env.API.fetch(rq);
 
 	const result = (await response.json()) as { success: boolean };
 

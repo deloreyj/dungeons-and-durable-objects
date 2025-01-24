@@ -12,16 +12,13 @@ interface EncounterResponse {
 }
 
 export async function loader({ context }: LoaderFunctionArgs) {
-	console.log('Creating encounter');
-	console.log('Context:', context);
-	const url = `${context.cloudflare.env.API_BASE_URL}/encounter`;
-	console.log('URL:', url);
-	const response = await fetch(url, {
+	const request = new Request(`${context.cloudflare.env.API_BASE_URL}/encounter`, {
 		method: 'POST',
 		headers: {
 			'Content-Type': 'application/json',
 		},
 	});
+	const response = await context.cloudflare.env.API.fetch(request);
 
 	console.log('Response:', response.ok);
 	console.log('Response:', response.status);

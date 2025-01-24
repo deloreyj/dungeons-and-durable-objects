@@ -56,12 +56,14 @@ export async function loader({ params, context }: LoaderFunctionArgs) {
 		throw new Response('Character name is required', { status: 400 });
 	}
 
-	const response = await fetch(`${context.cloudflare.env.API_BASE_URL}/character?name=${params.name}`, {
+	const request = new Request(`${context.cloudflare.env.API_BASE_URL}/character?name=${params.name}`, {
 		method: 'GET',
 		headers: {
-			'Content-Type': 'application/json',
-		},
+			'Content-Type': 'application/json'
+		}
 	});
+
+	const response = await fetch(request);
 
 	if (!response.ok) {
 		throw new Response('Character not found', { status: 404 });

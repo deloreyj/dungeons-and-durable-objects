@@ -58,12 +58,13 @@ interface EncounterLogMessage {
 }
 
 export async function loader({ params, context }: LoaderFunctionArgs) {
-	const response = await fetch(`${context.cloudflare.env.API_BASE_URL}/encounter/${params.id}`, {
+	const request = new Request(`${context.cloudflare.env.API_BASE_URL}/encounter/${params.id}`, {
 		method: 'GET',
 		headers: {
 			'Content-Type': 'application/json',
 		},
 	});
+	const response = await context.cloudflare.env.API.fetch(request);
 
 	if (!response.ok) {
 		throw new Error('Failed to load encounter');
